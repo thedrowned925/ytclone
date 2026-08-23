@@ -2,13 +2,13 @@ package com.thedrowned925.ytclone
 
 import android.app.Application
 import android.util.Log
-import dev.ffmpegkit_maintained.ytdlp.YtDlp
+import com.yausername.youtubedl_android.YoutubeDL
 
 class YTCloneApplication : Application() {
     override fun onCreate() {
         super.onCreate()
 
-        runCatching { YtDlp.init(this) }
+        runCatching { YoutubeDL.getInstance().init(this) }
             .onFailure { Log.e(TAG, "yt-dlp initialization failed", it) }
     }
 
