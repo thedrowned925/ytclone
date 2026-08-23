@@ -1,195 +1,179 @@
 # YTClone 925
 
-Android-first personal video platform: a private, fast, installable YouTube-style experience for one owner/viewer.
+YTClone is a single-owner, Android-native personal YouTube-style platform. The primary product is one Android app that can watch the library, import supported video URLs, preserve audio/subtitle variants, create useful quality renditions on-device, chunk large files, and publish them to GitHub Releases.
 
-## Current V1 foundation
+The old React/PWA code remains in the repository as an early UI prototype/fallback. It is no longer the primary architecture.
 
-- React + Vite mobile-first UI
-- Installable PWA shell for Android
-- YouTube-style home feed and category chips
-- Search screen
-- Channel and Library tabs
-- Continue-watching progress UI
-- Full-screen watch sheet
-- Quality selector: Auto / 1080p / 720p / 480p / 360p
-- Favorite, Watch Later and Download actions
-- YouTube URL / local file ingest UI
-- Multi-audio metadata model
-- Local uploader/ingest engine (heavy processing is NOT done in GitHub Actions)
-- YouTube/local source ingest with yt-dlp + ffmpeg/ffprobe
-- Subtitle and available alternate audio-track preservation
-- GitHub Releases publisher with resumable per-asset uploads
-- Automatic 1.8 GiB storage chunks for files that exceed the safe asset size
-- `storage-manifest.json` mapping chunks back to one logical media file
-- Trusted API virtual Range streaming across Release chunks
-- Storage-provider abstraction prepared for GitHub Releases and future providers
-- CI build workflow for lightweight build/check tasks only
+## Android-first product
 
-## Architecture
+The native project lives in `android/` and is built with Kotlin + Jetpack Compose.
+
+Current native foundation:
+
+- YouTube-style Android navigation and dark UI shell
+- YouTube app `Share -> YTClone` support for text/video URLs
+- Android-native yt-dlp import pipeline
+- title/channel/description/date/thumbnail metadata import
+- manual + automatic subtitle preservation when enabled
+- available alternate audio/dub/language track preservation
+- separate video and audio storage model
+- Media3 Transformer quality generation using Android codecs
+- 1080p / 720p / 480p / 360p renditions without upscaling
+- Media3 background playback service
+- WorkManager persistent ingest queue + foreground progress notification
+- secure GitHub repo/token settings inside the Android app
+- GitHub token encrypted at rest with Android Keystore AES/GCM
+- direct GitHub Release publisher running on Android
+- automatic 1.8 GiB chunking without making physical chunk copies on disk
+- resumable per-asset uploads
+- multi-Release overflow when one video would exceed the safe asset count
+- `storage-manifest.json` logical-file mapping
+- Android Media3 DataSource that reads many GitHub Release chunks as one seekable logical file
+- Media3 source merging for selected video quality + selected audio track
+- lightweight GitHub Actions APK build only; no media download/transcode/upload in Actions
+
+## Primary architecture
 
 ```text
-Android / PWA
-    |
-    +-- Home / Search / Shorts / Channels / Library
-    +-- Player / PiP / background playback / downloads
-    |
-Trusted API
-    |
-    +-- owner auth
-    +-- video catalog
-    +-- playback/download URLs
-    +-- virtual HTTP Range layer
-    |       |
-    |       +-- video.1080p.mp4.part0001
-    |       +-- video.1080p.mp4.part0002
-    |       +-- ...presented to the player as ONE file
-    |
-Local YTClone Uploader (owner PC)
-    |
-    +-- yt-dlp source import
-    +-- metadata + automatic channel mapping
-    +-- thumbnail/subtitle import
-    +-- all useful alternate audio tracks
-    +-- local ffmpeg/ffprobe processing
-    +-- quality renditions
-    +-- GitHub Release publisher
-    |
-StorageProvider
-    |
-    +-- GitHub Releases (first provider)
-    +-- R2/B2/etc. later without changing the UI
+YTClone Android APK
+|
++-- Jetpack Compose UI
+|   +-- Home
+|   +-- Shorts
+|   +-- Add / Archive
+|   +-- Channels
+|   +-- Library
+|   +-- Settings
+|
++-- Media3 / ExoPlayer
+|   +-- background playback
+|   +-- selected video quality
+|   +-- selected audio/dub track
+|   +-- GitHubChunkDataSource
+|
++-- Android ingest queue
+|   +-- yt-dlp in-process
+|   +-- metadata / thumbnail / subtitles
+|   +-- all useful audio variants
+|   +-- Media3 Transformer renditions
+|   +-- checkpoint / retry
+|
++-- Android GitHub storage client
+    +-- draft Releases
+    +-- 1.8 GiB chunks
+    +-- resume existing assets
+    +-- storage-manifest.json
+    +-- publish when complete
 ```
 
-## Why transcoding is local
+No PC is required by the target architecture. The earlier desktop uploader/server implementation remains useful as a development/fallback tool, but Android is expected to perform the full normal workflow.
 
-GitHub Actions is not the media-processing machine. Long transcodes/downloads can be slow or fail and should not control whether a video archive can be completed. The desktop/local uploader performs heavy work on the owner's computer, keeps its work directory, and uploads only completed assets. GitHub Actions stays limited to lightweight CI/build checks.
+## Android ingest flow
 
-## Ingest flow
+1. In YouTube, tap **Share -> YTClone**, or paste a supported URL into YTClone.
+2. YTClone reads the source metadata and available formats with yt-dlp on the phone.
+3. It downloads a high-quality source video stream.
+4. It preserves the default and available alternate audio/dub/language streams as separate files.
+5. It preserves subtitles if enabled.
+6. Media3 Transformer creates only useful Android-friendly H.264 renditions at or below the source resolution.
+7. Video and audio remain separate so changing language does not duplicate every video quality.
+8. Files larger than 1.8 GiB are uploaded to GitHub Releases as byte chunks directly from the source file.
+9. `storage-manifest.json` records the Release, asset, logical offset and size for every chunk.
+10. Upload retries skip same-name/same-size assets that already completed.
+11. If a single video would approach the Release asset-count ceiling, YTClone continues into `r002`, `r003`, and so on.
+12. Releases stay draft until all required files are present, then they are published.
 
-1. Paste a supported source URL or choose a local video.
-2. Read title, channel, thumbnail, duration, description, subtitles and available audio variants.
-3. Find or create the matching channel in YTClone.
-4. Keep the original file if configured.
-5. Preserve alternate/dub audio tracks as separate assets.
-6. Generate only useful renditions (never upscale): 1080p / 720p / 480p / 360p.
-7. Any logical file larger than 1.8 GiB is uploaded as multiple Release assets.
-8. Write `storage-manifest.json` so the API can reconstruct each logical file.
-9. Upload to a draft Release. Already-complete same-size assets are skipped on retry.
-10. Publish only after the package is complete.
+## Chunk size
 
-## Chunked Release storage
-
-GitHub Releases limits each individual asset to under 2 GiB. YTClone deliberately uses a lower chunk ceiling:
+YTClone deliberately stays below GitHub's per-asset ceiling:
 
 ```text
-CHUNK_SIZE = 1.8 GiB
+CHUNK_SIZE_BYTES = 1,932,735,283
+CHUNK_SIZE = floor(1.8 GiB)
 ```
 
-A large logical file may therefore look like this in GitHub:
+A large logical file may be stored as:
 
 ```text
-original.mkv.part0001
-original.mkv.part0002
-original.mkv.part0003
 video.1080p.mp4.part0001
 video.1080p.mp4.part0002
-audio.01.tr.turkce.m4a
-manifest.json
-storage-manifest.json
+video.1080p.mp4.part0003
+...
 ```
 
-The Android/PWA player never needs to know these are chunks. It requests a normal logical video with HTTP Range. The trusted API maps that requested byte range to the relevant Release chunk(s) and returns one continuous response.
+The Android player does not treat these as separate videos. `GitHubChunkDataSource` maps Media3 byte-range reads/seeks onto the correct Release asset and returns a continuous logical stream.
 
 ## Audio model
 
-Each archived video can have:
+Playable video renditions are video-only. Audio tracks are separate logical media assets.
 
-- a default audio track embedded in the playable rendition
-- additional source audio/dub/language tracks stored independently
-- language, title/label and channel metadata for each track
-- independent audio-track downloads
-- a future player audio selector without re-importing the source
-
-## Security rule
-
-Never ship GitHub tokens or storage credentials in browser/Android frontend code. Private Release assets must be accessed through the trusted API. The local uploader reads its GitHub credential from the environment, not from committed source code.
-
-## Web app local development
-
-```bash
-npm install
-npm run dev
-```
-
-Production build:
-
-```bash
-npm run build
-```
-
-## Local uploader engine
-
-Requirements on the owner PC:
-
-- Node.js 20+
-- yt-dlp
-- FFmpeg + ffprobe
-
-Check tools:
-
-```bash
-cd uploader
-npm run check
-```
-
-Process locally without uploading:
-
-```bash
-npm run ingest -- "video.mkv" --no-upload
-```
-
-Process a supported URL and publish to a media repository:
-
-```bash
-set YTCLONE_GITHUB_TOKEN=YOUR_TOKEN
-set YTCLONE_MEDIA_REPO=owner/media-repo
-npm run ingest -- "https://youtube.com/watch?v=..."
-```
-
-The CLI is the ingest engine; it is intended to sit behind the YTClone Uploader desktop GUI later.
-
-## Trusted API
-
-Environment:
+Example:
 
 ```text
-YTCLONE_GITHUB_TOKEN=...
-YTCLONE_MEDIA_REPO=owner/media-repo
-YTCLONE_APP_TOKEN=optional-single-owner-api-token
-PORT=8787
+video.1080p.mp4
+video.720p.mp4
+video.480p.mp4
+video.360p.mp4
+
+audio.001.m4a   # original/default
+audio.002.m4a   # Turkish dub
+audio.003.m4a   # English/alternate
 ```
 
-Current media routes:
+Media3 merges the selected video quality and selected audio track at playback time. This avoids storing the same audio repeatedly inside every quality rendition.
+
+## Android background work
+
+Heavy media work is not performed by GitHub Actions. Android uses WorkManager plus foreground notifications for ingest jobs. Existing downloads/renditions and already-uploaded Release assets are reused on retry whenever possible.
+
+A source file that the user chose not to archive is still kept locally until its derived renditions have been successfully uploaded. It is removed only after successful publication, preventing an interrupted upload from forcing a complete re-download.
+
+## Security
+
+GitHub credentials are never committed to the repository or hardcoded into the APK.
+
+The Android settings screen stores:
+
+- media repository (`owner/repo`)
+- a fine-grained GitHub token
+
+The token is encrypted on the device with an AES/GCM key stored in Android Keystore. It is decrypted only when the app needs to call GitHub.
+
+## Building Android
+
+The CI workflow `.github/workflows/android.yml` uses:
 
 ```text
-GET /api/videos/:id/play?quality=auto
-GET /api/videos/:id/download?quality=original
-GET /api/videos/:id/audio/:trackId
+JDK 17
+Gradle 9.5.0
+Android Gradle Plugin 9.3.0
+compileSdk 37
+Kotlin / Compose compiler 2.3.21
+Compose BOM 2026.08.00
+Media3 1.11.0
 ```
 
-All playback/download routes support HTTP byte-range streaming through chunked Release assets.
+It runs only an Android build and uploads the debug APK as a workflow artifact. It does not run yt-dlp, media encoding, or GitHub media uploads.
 
-## Next milestones
+From a configured local Android/Gradle environment:
 
-- Real catalog/channel index instead of mock feed
-- owner authentication suitable for Android/PWA
-- desktop GUI around the local uploader engine
-- persistent jobs, retry/resume UI and processing queue
-- hardware-accelerated encode detection (NVENC / Quick Sync / AMF where available)
-- real HTML5/HLS-capable player UI
-- persistent watch history and resume
-- Android offline download manager
-- Picture-in-Picture and background audio
-- player audio-track selector
-- playlists, subscriptions-like channel library and Shorts
-- optional Capacitor APK/AAB packaging
+```bash
+gradle -p android :app:assembleDebug
+```
+
+## Current next milestones
+
+- native catalog that syncs published videos/channels from GitHub Releases
+- full Compose watch screen using the chunk DataSource
+- quality and audio-track selectors in the player UI
+- Picture-in-Picture and polished background playback controls
+- watch history / resume position
+- offline downloads and storage-management UI
+- processing queue/history UI with pause/cancel/retry
+- channel pages, playlists and Shorts
+- automatic channel artwork/banner import where available
+- release/debug APK verification and iterative device testing
+
+## Legacy prototype/fallback
+
+The root React/Vite app, `uploader/`, and `server/` folders are retained because they contain useful prototypes and fallback tooling. New product work should target `android/` unless a task explicitly concerns the legacy web/desktop path.
