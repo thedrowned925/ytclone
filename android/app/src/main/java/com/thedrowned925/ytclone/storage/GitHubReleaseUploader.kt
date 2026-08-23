@@ -45,6 +45,7 @@ class GitHubReleaseUploader(
         mediaManifest: JSONObject,
         repoValue: String,
         token: String,
+        excludedLogicalNames: Set<String> = emptySet(),
         onProgress: (percent: Int, detail: String) -> Unit,
     ): PublishResult {
         val (owner, repo) = parseRepo(repoValue)
@@ -52,7 +53,7 @@ class GitHubReleaseUploader(
             ?: sha256(mediaManifest.optString("webpageUrl") + mediaManifest.optString("title")).take(16)
         val baseTag = "ytclone-${sanitizeTag(videoId)}"
 
-        val files = planFiles(jobDir)
+        val files = planFiles(jobDir, excludedLogicalNames)
         val allParts = files.flatMap { it.parts }
         require(allParts.isNotEmpty()) { "Yüklenecek dosya yok" }
 
@@ -139,11 +140,12 @@ class GitHubReleaseUploader(
         return PublishResult(videoId, releaseTags.first(), releaseTags, storageManifestFile)
     }
 
-    private fun planFiles(root: File): List<PlannedFile> = root.walkTopDown()
-        .filter { it.isFile }
+    private fun planFiles(root: File, excludedLogicalNames: Set<String>): List<PlannedFile> = root.walkTopDown()
+        .filter { it.isFile && it.length() > 0L }
         .filterNot { it.name.endsWith(".part") || it.name == STORAGE_MANIFEST || it.name == "publish.json" }
-        .map { file ->
-            val logical = file.relativeTo(root).invariantSeparatorsPath
+        .map { file -> file to file.relativeTo(root).invariantSeparatorsPath }
+        .filterNot { (_, logical) -> logical in excludedLogicalNames }
+        .map { (file, logical) ->
             val size = file.length()
             val totalParts = maxOf(1, ceil(size / CHUNK_SIZE_BYTES.toDouble()).toInt())
             val parts = MutableList(totalParts) { index ->
