@@ -27,9 +27,15 @@ class YoutubeIngestWorker(
 ) : CoroutineWorker(appContext, params) {
     private val notifications = appContext.getSystemService(NotificationManager::class.java)
 
+    @Volatile
+    private var lastProgressStage: String = "queued"
+
+    @Volatile
+    private var lastProgressPercent: Int = 0
+
     override suspend fun doWork(): Result {
         val url = inputData.getString(KEY_URL)?.trim().orEmpty()
-        if (url.isBlank()) return Result.failure(errorData("Video bağlantısı boş"))
+        if (url.isBlank()) return Result.failure(errorData("Video bağlantısı boş", "metadata", 0))
 
         ensureNotificationChannel()
         setForeground(createForegroundInfo(0, "queued", "YTClone hazırlanıyor"))
@@ -55,9 +61,8 @@ class YoutubeIngestWorker(
             val token = settings.gitHubToken()
             val repo = settings.mediaRepo()
 
-            // A media Release can already be published while catalog/cleanup was
-            // interrupted by process death. Resume from the tiny internal state,
-            // never download the video again in that case.
+            // Release daha önce yayınlandıysa indirmeye geri dönme. Sadece katalog/temizlik
+            // aşamasını kaldığı yerden tamamla.
             if (statePublishFile.exists()) {
                 require(!token.isNullOrBlank()) { "GitHub token ayarlı değil" }
                 finalizeCatalogAndCleanup(jobId, stateDir, jobDir, repo, token, statePublishFile)
@@ -66,12 +71,19 @@ class YoutubeIngestWorker(
 
             refreshYtDlp()
 
-            val imported = loadImported(jobDir) ?: importWithOneSelfUpdateRetry(
-                url = url,
-                jobId = jobId,
-                jobDir = jobDir,
-                options = options,
-            )
+            // WorkManager seviyesinde tüm işi yeniden başlatmıyoruz. Import motoru aynı
+            // kalite üzerinde yt-dlp'nin kendi retry/continue mekanizmasını kullanıyor;
+            // tamamlanmış kalite ve ses dosyalarını da yeniden indirmiyor.
+            val imported = loadImported(jobDir) ?: withContext(Dispatchers.IO) {
+                YoutubeImportEngine().import(
+                    url = url,
+                    jobDir = jobDir,
+                    processId = "ytclone-$jobId",
+                    options = options,
+                ) { stage, percent, detail ->
+                    updateProgress(stage, percent.coerceIn(0, 70), detail)
+                }
+            }
 
             val manifest = JSONObject(imported.manifestFile.readText())
             var audioTracks = imported.audioTracks
@@ -136,8 +148,8 @@ class YoutubeIngestWorker(
             }
             check(published.verified) { "GitHub Release doğrulanamadı; Downloads klasöründeki dosyalar korunuyor" }
 
-            // Copy only tiny state files into app-private storage before deleting
-            // the public Download payload. No video/audio payload is copied here.
+            // Sadece küçük state dosyalarını private alana kopyala; video/ses payload'u
+            // Downloads altında kalır ve doğrulamadan sonra temizlenir.
             saveStateSnapshot(jobDir, stateDir)
             check(statePublishFile.exists()) { "GitHub yayın durumu kaydedilemedi; yerel dosyalar korunuyor" }
 
@@ -147,8 +159,14 @@ class YoutubeIngestWorker(
             throw cancelled
         } catch (error: Throwable) {
             val message = readableError(error)
-            updateProgress("failed", 0, "Hata: $message")
-            if (runAttemptCount < 2) Result.retry() else Result.failure(errorData(message))
+            val failedStage = lastProgressStage.takeUnless { it == "failed" } ?: "metadata"
+            val failedPercent = lastProgressPercent.coerceIn(0, 99)
+            updateProgress("failed", failedPercent, "Hata: $message")
+
+            // ÖNEMLİ: Result.retry() yok. Eski davranış tüm pipeline'ı baştan başlatıp
+            // metadata -> kalite indirme -> metadata döngüsü yaratıyordu. Ağ/fragment
+            // retry'ları YoutubeImportEngine içinde aynı dosya üzerinde yapılır.
+            Result.failure(errorData(message, failedStage, failedPercent))
         }
     }
 
@@ -158,47 +176,13 @@ class YoutubeIngestWorker(
                 updateProgress("ytdlp-update", 1, detail)
             }
         }.onFailure { error ->
-            // Updating is best-effort. An existing recent extractor may still work;
-            // if extraction fails we retry the update immediately below.
+            // Güncelleme best-effort. Mevcut yt-dlp çalışabiliyorsa indirme devam eder;
+            // gerçek hata artık tüm işi yeniden başlatmadan kullanıcıya gösterilir.
             updateProgress(
                 "ytdlp-update",
                 1,
                 "yt-dlp güncelleme kontrolü başarısız (${readableError(error)}); mevcut sürüm deneniyor",
             )
-        }
-    }
-
-    private suspend fun importWithOneSelfUpdateRetry(
-        url: String,
-        jobId: String,
-        jobDir: File,
-        options: IngestOptions,
-    ): YoutubeImportEngine.ImportedMedia {
-        val engine = YoutubeImportEngine()
-        suspend fun runImport(processSuffix: String): YoutubeImportEngine.ImportedMedia = withContext(Dispatchers.IO) {
-            engine.import(
-                url = url,
-                jobDir = jobDir,
-                processId = "ytclone-$jobId-$processSuffix",
-                options = options,
-            ) { stage, percent, detail ->
-                updateProgress(stage, percent.coerceIn(0, 70), detail)
-            }
-        }
-
-        return try {
-            runImport("first")
-        } catch (first: Throwable) {
-            updateProgress("ytdlp-update", 2, "YouTube çözümleyici hata verdi; yt-dlp yeniden güncellenip bir kez daha deneniyor")
-            runCatching { YtDlpUpdateManager.updateNow(applicationContext) { updateProgress("ytdlp-update", 2, it) } }
-            try {
-                runImport("retry")
-            } catch (second: Throwable) {
-                throw IllegalStateException(
-                    "YouTube çözümlenemedi. yt-dlp güncellemesinden sonraki hata: ${readableError(second)}",
-                    second,
-                )
-            }
         }
     }
 
@@ -210,8 +194,6 @@ class YoutubeIngestWorker(
         token: String,
         publishFile: File,
     ) {
-        // If process death happened just after upload, recover state from the
-        // Downloads workspace before attempting catalog publication.
         if (!File(stateDir, "manifest.json").exists()) saveStateSnapshot(jobDir, stateDir)
 
         val manifestFile = File(stateDir, "manifest.json")
@@ -372,6 +354,9 @@ class YoutubeIngestWorker(
         etaSeconds: Long = 0L,
     ) {
         val safePercent = percent.coerceIn(0, 100)
+        lastProgressStage = stage
+        lastProgressPercent = safePercent
+
         setProgressAsync(
             Data.Builder()
                 .putString(PROGRESS_STAGE, stage)
@@ -496,9 +481,11 @@ class YoutubeIngestWorker(
             .ifBlank { error.javaClass.simpleName }
     }
 
-    private fun errorData(message: String): Data = Data.Builder()
+    private fun errorData(message: String, failedStage: String, failedPercent: Int): Data = Data.Builder()
         .putString(OUTPUT_STATE, "failed")
         .putString(OUTPUT_ERROR, message.take(500))
+        .putString(OUTPUT_FAILED_STAGE, failedStage)
+        .putInt(OUTPUT_FAILED_PERCENT, failedPercent.coerceIn(0, 99))
         .build()
 
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
@@ -541,6 +528,8 @@ class YoutubeIngestWorker(
         const val OUTPUT_VIDEO_ID = "videoId"
         const val OUTPUT_RELEASE_TAG = "releaseTag"
         const val OUTPUT_ERROR = "error"
+        const val OUTPUT_FAILED_STAGE = "failedStage"
+        const val OUTPUT_FAILED_PERCENT = "failedPercent"
 
         private const val CATALOG_MARKER = "catalog-published.json"
         private const val COMPLETE_MARKER = "complete.json"
