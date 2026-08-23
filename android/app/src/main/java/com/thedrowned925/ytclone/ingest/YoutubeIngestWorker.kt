@@ -57,6 +57,7 @@ class YoutubeIngestWorker(
                 importEngine.import(
                     url = url,
                     jobDir = jobDir,
+                    processId = "ytclone-$jobId",
                     options = options,
                 ) { _, percent, detail ->
                     updateProgress(percent.coerceIn(0, 70), detail)
