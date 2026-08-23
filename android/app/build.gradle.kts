@@ -50,16 +50,18 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.11.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
 
-    implementation("androidx.media3:media3-exoplayer:1.11.0")
-    implementation("androidx.media3:media3-session:1.11.0")
-    implementation("androidx.media3:media3-ui:1.11.0")
+    val media3 = "1.11.0"
+    implementation("androidx.media3:media3-exoplayer:$media3")
+    implementation("androidx.media3:media3-session:$media3")
+    implementation("androidx.media3:media3-ui:$media3")
+    implementation("androidx.media3:media3-transformer:$media3")
+    implementation("androidx.media3:media3-effect:$media3")
 
     implementation("androidx.work:work-runtime-ktx:2.11.2")
-
     implementation("com.squareup.okhttp3:okhttp-android:5.1.0")
 
-    val youtubedlAndroid = "0.18.1"
-    implementation("io.github.junkfood02.youtubedl-android:library:$youtubedlAndroid")
-    implementation("io.github.junkfood02.youtubedl-android:ffmpeg:$youtubedlAndroid")
-    implementation("io.github.junkfood02.youtubedl-android:aria2c:$youtubedlAndroid")
+    // Current Android-native yt-dlp wrapper. The compat artifact preserves the
+    // familiar YoutubeDL/YoutubeDLRequest API while using Python 3.13 in-process.
+    implementation("dev.ffmpegkit-maintained:yt-dlp-android:2.0.2")
+    implementation("dev.ffmpegkit-maintained:yt-dlp-android-compat:2.0.2")
 }
