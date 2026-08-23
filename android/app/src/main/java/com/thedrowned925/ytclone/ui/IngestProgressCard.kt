@@ -29,26 +29,26 @@ import com.thedrowned925.ytclone.ingest.YoutubeIngestWorker
 import java.util.UUID
 
 private data class IngestStep(
+    val key: String,
     val title: String,
-    val fromPercent: Int,
 )
 
 private val ingestSteps = listOf(
-    IngestStep("Video bilgileri alınıyor", 0),
-    IngestStep("Kaynak video indiriliyor", 3),
-    IngestStep("Ses parçaları ve altyazılar alınıyor", 46),
-    IngestStep("Kalite sürümleri oluşturuluyor", 71),
-    IngestStep("1.8 GiB chunk planı hazırlanıyor", 82),
-    IngestStep("GitHub Release'e yükleniyor", 84),
-    IngestStep("Release yayınlanıyor", 98),
-    IngestStep("Katalog güncelleniyor", 99),
-    IngestStep("Yüklendi ve güncellendi", 100),
+    IngestStep("metadata", "Video ve format bilgileri alınıyor"),
+    IngestStep("download-video", "4K'ya kadar kalite/FPS sürümleri indiriliyor"),
+    IngestStep("download-audio", "Ses parçaları ve altyazılar indiriliyor"),
+    IngestStep("channel", "Kanal, avatar ve banner bilgileri alınıyor"),
+    IngestStep("chunk-plan", "1.8 GiB chunk planı hazırlanıyor"),
+    IngestStep("upload", "Tek GitHub Release'e yükleniyor"),
+    IngestStep("verify", "GitHub yüklemesi doğrulanıyor"),
+    IngestStep("catalog", "Video ve kanal katalogları güncelleniyor"),
+    IngestStep("cleanup", "Telefondaki geçici medya temizleniyor"),
+    IngestStep("complete", "Yüklendi ve güncellendi"),
 )
 
 @Composable
 fun IngestProgressCard(workId: String?) {
     if (workId.isNullOrBlank()) return
-
     val uuid = remember(workId) { runCatching { UUID.fromString(workId) }.getOrNull() } ?: return
     val context = LocalContext.current
     val workManager = remember(context) { WorkManager.getInstance(context) }
@@ -58,26 +58,30 @@ fun IngestProgressCard(workId: String?) {
     val info = workInfo
     val state = info?.state
     val rawPercent = info?.progress?.getInt(YoutubeIngestWorker.PROGRESS_PERCENT, 0) ?: 0
-    val percent = when (state) {
-        WorkInfo.State.SUCCEEDED -> 100
-        else -> rawPercent.coerceIn(0, 100)
+    val percent = if (state == WorkInfo.State.SUCCEEDED) 100 else rawPercent.coerceIn(0, 100)
+    val stage = when (state) {
+        WorkInfo.State.SUCCEEDED -> "complete"
+        WorkInfo.State.FAILED -> "failed"
+        WorkInfo.State.CANCELLED -> "failed"
+        WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED -> "queued"
+        else -> info?.progress?.getString(YoutubeIngestWorker.PROGRESS_STAGE) ?: "queued"
     }
+
     val detail = when (state) {
         WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED -> "Kuyrukta · ağ bağlantısı bekleniyor olabilir"
-        WorkInfo.State.SUCCEEDED -> "Yüklendi ve katalog güncellendi. Video YTClone'da hazır."
+        WorkInfo.State.SUCCEEDED -> "Yüklendi, GitHub doğrulandı, katalog güncellendi ve geçici medya temizlendi."
         WorkInfo.State.FAILED -> info.outputData.getString(YoutubeIngestWorker.OUTPUT_ERROR)?.let { "Hata: $it" }
             ?: "İşlem başarısız oldu"
         WorkInfo.State.CANCELLED -> "İşlem iptal edildi"
-        else -> info?.progress?.getString(YoutubeIngestWorker.PROGRESS_DETAIL)
-            ?: "İş başlatılıyor…"
+        else -> info?.progress?.getString(YoutubeIngestWorker.PROGRESS_DETAIL) ?: "İş başlatılıyor…"
     }
 
+    val doneBytes = info?.progress?.getLong(YoutubeIngestWorker.PROGRESS_DONE_BYTES, 0L) ?: 0L
+    val totalBytes = info?.progress?.getLong(YoutubeIngestWorker.PROGRESS_TOTAL_BYTES, 0L) ?: 0L
+    val speed = info?.progress?.getLong(YoutubeIngestWorker.PROGRESS_SPEED_BPS, 0L) ?: 0L
+    val eta = info?.progress?.getLong(YoutubeIngestWorker.PROGRESS_ETA_SECONDS, 0L) ?: 0L
     val failed = state == WorkInfo.State.FAILED || state == WorkInfo.State.CANCELLED
-    val activeIndex = if (failed) {
-        ingestSteps.indexOfLast { percent >= it.fromPercent }.coerceAtLeast(0)
-    } else {
-        ingestSteps.indexOfLast { percent >= it.fromPercent }.coerceAtLeast(0)
-    }
+    val activeIndex = activeStepIndex(stage, percent)
 
     Column(
         modifier = Modifier
@@ -107,7 +111,22 @@ fun IngestProgressCard(workId: String?) {
             trackColor = Color(0xFF353535),
         )
         Spacer(Modifier.height(10.dp))
-        Text(detail, color = Color(0xFFBDBDBD), fontSize = 12.sp)
+        Text(detail, color = Color(0xFFD0D0D0), fontSize = 12.sp)
+
+        if (totalBytes > 0L) {
+            Spacer(Modifier.height(5.dp))
+            Text(
+                buildString {
+                    append(formatBytes(doneBytes))
+                    append(" / ")
+                    append(formatBytes(totalBytes))
+                    if (speed > 0) append("  ·  ${formatSpeed(speed)}")
+                    if (eta > 0) append("  ·  ETA ${formatEta(eta)}")
+                },
+                color = Color(0xFF9E9E9E),
+                fontSize = 11.sp,
+            )
+        }
         if ((info?.runAttemptCount ?: 0) > 0) {
             Text("Deneme: ${(info?.runAttemptCount ?: 0) + 1}", color = Color(0xFF888888), fontSize = 11.sp)
         }
@@ -134,7 +153,6 @@ fun IngestProgressCard(workId: String?) {
                     color = Color(0xFF777777)
                 }
             }
-
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -149,4 +167,42 @@ fun IngestProgressCard(workId: String?) {
             }
         }
     }
+}
+
+private fun activeStepIndex(stage: String, percent: Int): Int {
+    val normalized = when (stage) {
+        "audio-extract" -> "download-audio"
+        "published" -> "verify"
+        "waiting-settings" -> "chunk-plan"
+        "failed" -> when {
+            percent >= 99 -> "cleanup"
+            percent >= 96 -> "catalog"
+            percent >= 90 -> "verify"
+            percent >= 72 -> "upload"
+            percent >= 71 -> "chunk-plan"
+            percent >= 69 -> "channel"
+            percent >= 53 -> "download-audio"
+            percent >= 4 -> "download-video"
+            else -> "metadata"
+        }
+        else -> stage
+    }
+    return ingestSteps.indexOfFirst { it.key == normalized }.takeIf { it >= 0 } ?: 0
+}
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1024L * 1024L * 1024L -> "%.2f GiB".format(bytes / (1024.0 * 1024.0 * 1024.0))
+    bytes >= 1024L * 1024L -> "%.1f MiB".format(bytes / (1024.0 * 1024.0))
+    else -> "%.1f KiB".format(bytes / 1024.0)
+}
+
+private fun formatSpeed(bytesPerSecond: Long): String = when {
+    bytesPerSecond >= 1024L * 1024L -> "%.1f MiB/s".format(bytesPerSecond / (1024.0 * 1024.0))
+    else -> "%.1f KiB/s".format(bytesPerSecond / 1024.0)
+}
+
+private fun formatEta(seconds: Long): String = when {
+    seconds >= 3600 -> "%dh %02dm".format(seconds / 3600, (seconds % 3600) / 60)
+    seconds >= 60 -> "%dm %02ds".format(seconds / 60, seconds % 60)
+    else -> "${seconds}s"
 }
