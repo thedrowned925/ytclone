@@ -46,7 +46,7 @@ class YoutubeIngestWorker(
             keepOriginal = true,
             createRenditions = false,
         )
-        val jobId = sha256(url).take(24)
+        val jobId = sha256(ArchiveMediaSchema.stateKey(url)).take(24)
         val stateDir = File(applicationContext.filesDir, "ingest-state/$jobId").apply { mkdirs() }
         val jobDir = workingDirectory(jobId).apply { mkdirs() }
         val statePublishFile = File(stateDir, "publish.json")

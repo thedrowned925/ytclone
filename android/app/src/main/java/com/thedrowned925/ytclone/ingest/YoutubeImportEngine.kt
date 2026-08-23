@@ -186,6 +186,7 @@ class YoutubeImportEngine {
             val request = YoutubeDLRequest(url).apply {
                 commonMediaOptions()
                 addOption("-f", format.id)
+                addOption("--remux-video", ArchiveMediaSchema.VIDEO_CONTAINER)
                 addOption("-o", File(jobDir, "${base}%(ext)s").absolutePath)
             }
 
@@ -257,6 +258,7 @@ class YoutubeImportEngine {
             val request = YoutubeDLRequest(url).apply {
                 commonMediaOptions()
                 addOption("-f", format.id)
+                addOption("--remux-video", ArchiveMediaSchema.AUDIO_CONTAINER)
                 addOption("-o", File(jobDir, "${base}%(ext)s").absolutePath)
             }
 
@@ -690,7 +692,10 @@ class YoutubeImportEngine {
         channelFile: File,
         warnings: List<String>,
     ): JSONObject = JSONObject().apply {
-        put("schemaVersion", 5)
+        put("schemaVersion", 6)
+        put("archiveMediaSchemaVersion", ArchiveMediaSchema.VERSION)
+        put("seekableMedia", true)
+        put("mediaContainerPolicy", "lossless-matroska-remux")
         put("source", "youtube")
         put("sourceId", metadata.optString("id"))
         put("webpageUrl", metadata.optString("webpage_url"))
