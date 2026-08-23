@@ -41,6 +41,10 @@ jobs:
         run: |
           mkdir -p "$HOME/.android"
           if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            if [ -f "SIGNING-V1-INITIALIZED" ]; then
+              echo "::error::YTClone stable signing key cache is missing. Refusing to create a different key because Android updates would lose signature compatibility. Restore the original signing key before releasing another APK."
+              exit 1
+            fi
             keytool -genkeypair -v \
               -keystore "$HOME/.android/debug.keystore" \
               -storepass android \
@@ -95,8 +99,10 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           printf '# Android Release Status\n\n- Release: v0.1.1\n- Asset: YTClone-0.1.1-debug.apk\n- Status: published successfully\n- Source commit: %s\n' "$GITHUB_SHA" > RELEASE-STATUS.md
+          KEY_FINGERPRINT=$(keytool -list -v -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey | sed -n 's/.*SHA256: //p' | head -n 1)
+          printf 'YTClone Android stable signing initialized with v0.1.1\nSHA256: %s\n' "$KEY_FINGERPRINT" > SIGNING-V1-INITIALIZED
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add RELEASE-STATUS.md
+          git add RELEASE-STATUS.md SIGNING-V1-INITIALIZED
           git diff --cached --quiet || git commit -m "chore: record v0.1.1 release publication [skip ci]"
           git push
