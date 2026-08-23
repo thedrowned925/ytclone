@@ -43,6 +43,7 @@ class YoutubeImportEngine {
         url: String,
         jobDir: File,
         processId: String,
+        options: IngestOptions = IngestOptions(),
         onProgress: (stage: String, percent: Int, detail: String) -> Unit,
     ): ImportedMedia {
         jobDir.mkdirs()
@@ -51,8 +52,10 @@ class YoutubeImportEngine {
         val metadata = readMetadata(url)
         val formats = readFormats(metadata)
         val videoFormat = chooseSourceVideo(formats)
-            ?: error("Video-only kaynak format bulunamadı")
-        val audioFormats = chooseAudioTracks(formats)
+            ?: error("Uygun video formatı bulunamadı")
+        val selectedAudio = chooseAudioTracks(formats).let { tracks ->
+            if (options.allAudioTracks) tracks else tracks.take(1)
+        }
 
         onProgress("download-video", 3, "Kaynak video indiriliyor")
         val videoRequest = YoutubeDLRequest(url).apply {
@@ -61,10 +64,12 @@ class YoutubeImportEngine {
             addOption("-o", File(jobDir, "video.source.%(ext)s").absolutePath)
             addOption("--write-info-json")
             addOption("--write-thumbnail")
-            addOption("--write-subs")
-            addOption("--write-auto-subs")
-            addOption("--sub-langs", "all")
-            addOption("--sub-format", "vtt/best")
+            if (options.subtitles) {
+                addOption("--write-subs")
+                addOption("--write-auto-subs")
+                addOption("--sub-langs", "all")
+                addOption("--sub-format", "vtt/best")
+            }
         }
         YoutubeDL.getInstance().execute(videoRequest, processId) { progress, _, line ->
             val mapped = 3 + (progress.coerceIn(0f, 100f) * 0.42f).roundToInt()
@@ -75,10 +80,10 @@ class YoutubeImportEngine {
             ?: error("Kaynak video dosyası indirildi fakat bulunamadı")
 
         val downloadedAudio = mutableListOf<AudioTrack>()
-        audioFormats.forEachIndexed { index, format ->
+        selectedAudio.forEachIndexed { index, format ->
             val base = "audio.${(index + 1).toString().padStart(3, '0')}."
-            val start = 46 + ((index.toDouble() / audioFormats.size.coerceAtLeast(1)) * 24.0).roundToInt()
-            onProgress("download-audio", start, "Ses ${index + 1}/${audioFormats.size}: ${format.language} ${format.note}")
+            val start = 46 + ((index.toDouble() / selectedAudio.size.coerceAtLeast(1)) * 24.0).roundToInt()
+            onProgress("download-audio", start, "Ses ${index + 1}/${selectedAudio.size}: ${format.language} ${format.note}")
 
             val request = YoutubeDLRequest(url).apply {
                 addOption("--no-playlist")
@@ -86,7 +91,7 @@ class YoutubeImportEngine {
                 addOption("-o", File(jobDir, "${base}%(ext)s").absolutePath)
             }
             YoutubeDL.getInstance().execute(request, "$processId-audio-$index") { progress, _, line ->
-                val span = 24.0 / audioFormats.size.coerceAtLeast(1)
+                val span = 24.0 / selectedAudio.size.coerceAtLeast(1)
                 val mapped = 46 + ((index * span) + (progress.coerceIn(0f, 100f) / 100f * span)).roundToInt()
                 onProgress("download-audio", mapped.coerceAtMost(70), line)
             }
@@ -103,7 +108,10 @@ class YoutubeImportEngine {
             )
         }
 
-        val manifest = buildManifest(metadata, videoFormat, sourceVideo, downloadedAudio)
+        // Some sources only expose progressive video+audio formats. If there was
+        // no separate audio-only stream, preserve the source as the default audio
+        // carrier for now; the catalog records this explicitly for the player.
+        val manifest = buildManifest(metadata, videoFormat, sourceVideo, downloadedAudio, options)
         val manifestFile = File(jobDir, "manifest.json")
         manifestFile.writeText(manifest.toString(2))
 
@@ -155,15 +163,23 @@ class YoutubeImportEngine {
         }
     }
 
-    private fun chooseSourceVideo(formats: List<FormatCandidate>): FormatCandidate? =
-        formats
+    private fun chooseSourceVideo(formats: List<FormatCandidate>): FormatCandidate? {
+        val videoOnly = formats
             .asSequence()
             .filter { it.vcodec != "none" && it.acodec == "none" && it.height > 0 }
-            .maxByOrNull {
-                (it.height.toLong() * 1_000_000L) +
-                    (it.tbr * 100).toLong() +
-                    if (it.ext == "mp4") 10_000L else 0L
-            }
+            .maxByOrNull { videoScore(it) }
+        if (videoOnly != null) return videoOnly
+
+        return formats
+            .asSequence()
+            .filter { it.vcodec != "none" && it.height > 0 }
+            .maxByOrNull { videoScore(it) }
+    }
+
+    private fun videoScore(format: FormatCandidate): Long =
+        (format.height.toLong() * 1_000_000L) +
+            (format.tbr * 100).toLong() +
+            if (format.ext == "mp4") 10_000L else 0L
 
     private fun chooseAudioTracks(formats: List<FormatCandidate>): List<FormatCandidate> {
         val audio = formats.filter { it.vcodec == "none" && it.acodec != "none" }
@@ -199,6 +215,7 @@ class YoutubeImportEngine {
         video: FormatCandidate,
         sourceVideo: File,
         audioTracks: List<AudioTrack>,
+        options: IngestOptions,
     ): JSONObject = JSONObject().apply {
         put("schemaVersion", 2)
         put("source", "youtube")
@@ -208,15 +225,23 @@ class YoutubeImportEngine {
         put("description", metadata.optString("description"))
         put("channel", metadata.optString("channel", metadata.optString("uploader")))
         put("channelId", metadata.optString("channel_id", metadata.optString("uploader_id")))
+        put("channelUrl", metadata.optString("channel_url"))
         put("uploadDate", metadata.optString("upload_date"))
         put("durationSeconds", metadata.optDouble("duration", 0.0))
         put("thumbnail", metadata.optString("thumbnail"))
+        put("ingestOptions", JSONObject().apply {
+            put("allAudioTracks", options.allAudioTracks)
+            put("subtitles", options.subtitles)
+            put("keepOriginal", options.keepOriginal)
+            put("createRenditions", options.createRenditions)
+        })
         put("sourceVideo", JSONObject().apply {
             put("logicalName", sourceVideo.name)
             put("formatId", video.id)
             put("height", video.height)
             put("codec", video.vcodec)
             put("container", video.ext)
+            put("containsAudio", video.acodec != "none")
         })
         put("audioTracks", JSONArray().apply {
             audioTracks.forEach { track ->
