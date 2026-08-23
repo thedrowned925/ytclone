@@ -7,11 +7,20 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
+import java.security.MessageDigest
 
 object IngestQueue {
-    fun enqueue(context: Context, url: String) {
+    fun enqueue(context: Context, url: String, options: IngestOptions = IngestOptions()) {
         val request = OneTimeWorkRequestBuilder<YoutubeIngestWorker>()
-            .setInputData(Data.Builder().putString(YoutubeIngestWorker.KEY_URL, url).build())
+            .setInputData(
+                Data.Builder()
+                    .putString(YoutubeIngestWorker.KEY_URL, url)
+                    .putBoolean(YoutubeIngestWorker.KEY_ALL_AUDIO, options.allAudioTracks)
+                    .putBoolean(YoutubeIngestWorker.KEY_SUBTITLES, options.subtitles)
+                    .putBoolean(YoutubeIngestWorker.KEY_KEEP_ORIGINAL, options.keepOriginal)
+                    .putBoolean(YoutubeIngestWorker.KEY_RENDITIONS, options.createRenditions)
+                    .build(),
+            )
             .setConstraints(
                 Constraints.Builder()
                     .setRequiredNetworkType(NetworkType.CONNECTED)
@@ -21,11 +30,15 @@ object IngestQueue {
             .build()
 
         WorkManager.getInstance(context).enqueueUniqueWork(
-            "ytclone-ingest-${request.id}",
+            "ytclone-ingest-${sha256(url).take(20)}",
             ExistingWorkPolicy.KEEP,
             request,
         )
     }
+
+    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(Charsets.UTF_8))
+        .joinToString("") { "%02x".format(it) }
 
     const val TAG_INGEST = "ytclone-ingest"
 }
