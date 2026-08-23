@@ -30,8 +30,11 @@ object IngestQueue {
             .addTag(TAG_INGEST)
             .build()
 
+        // The schema version is part of the unique-work key. When the physical
+        // archive representation changes (v2 = seekable Matroska), the same URL
+        // is allowed to run once again so its existing Release can be repaired.
         WorkManager.getInstance(context).enqueueUniqueWork(
-            "ytclone-ingest-${sha256(url).take(20)}",
+            "ytclone-ingest-v${ArchiveMediaSchema.VERSION}-${sha256(url).take(20)}",
             ExistingWorkPolicy.KEEP,
             request,
         )
