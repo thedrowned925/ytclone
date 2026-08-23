@@ -97,7 +97,6 @@ fun YTCloneApp(
     var importUrl by remember { mutableStateOf("") }
     var settingsOpen by remember { mutableStateOf(false) }
     var activeWorkId by remember { mutableStateOf(settingsStore.lastIngestWorkId()) }
-    val savedIngestOptions = remember { settingsStore.ingestOptions() }
 
     LaunchedEffect(incomingUrl) {
         if (!incomingUrl.isNullOrBlank()) {
@@ -175,11 +174,8 @@ fun YTCloneApp(
                     Tab.Add -> ImportScreen(
                         url = importUrl,
                         onUrlChange = { importUrl = it },
-                        initialOptions = savedIngestOptions,
                         activeWorkId = activeWorkId,
-                        onArchive = { url, options ->
-                            activeWorkId = onArchive(url, options)
-                        },
+                        onArchive = { url, options -> activeWorkId = onArchive(url, options) },
                         storageReady = mediaRepo.contains('/') && tokenConfigured,
                     )
                     Tab.Channels -> SimplePage("Kanallar", "İçe aktarılan videolar kaynak kanalına göre otomatik gruplanacak.")
@@ -232,7 +228,7 @@ private fun HomeScreen(
                     Text("Kişisel YouTube arşivin", fontSize = 22.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "YouTube'dan paylaş veya bağlantı yapıştır. Video, sesler, altyazılar ve kalite sürümleri Android'de hazırlanacak.",
+                        "YouTube'dan paylaş veya bağlantı yapıştır. 4K'ya kadar tüm kalite/FPS sürümleri, sesler ve altyazılar Android'de arşivlenecek.",
                         color = Color(0xFFAAAAAA),
                     )
                     Spacer(Modifier.height(22.dp))
@@ -273,7 +269,7 @@ private fun VideoCard(video: LocalCatalogRepository.Video, onOpen: (LocalCatalog
             Column(modifier = Modifier.weight(1f).padding(start = 10.dp)) {
                 Text(video.title, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Text(
-                    "${video.channel} · ${video.qualities.size} kalite · ${video.audioTracks.size} ses · ${video.status}",
+                    "${video.channel} · ${video.qualities.size} kalite/FPS · ${video.audioTracks.size} ses · ${video.status}",
                     color = Color(0xFFAAAAAA),
                     fontSize = 12.sp,
                     maxLines = 1,
@@ -288,15 +284,10 @@ private fun VideoCard(video: LocalCatalogRepository.Video, onOpen: (LocalCatalog
 private fun ImportScreen(
     url: String,
     onUrlChange: (String) -> Unit,
-    initialOptions: IngestOptions,
     activeWorkId: String?,
     onArchive: (String, IngestOptions) -> Unit,
     storageReady: Boolean,
 ) {
-    var allAudio by remember { mutableStateOf(initialOptions.allAudioTracks) }
-    var subtitles by remember { mutableStateOf(initialOptions.subtitles) }
-    var keepOriginal by remember { mutableStateOf(initialOptions.keepOriginal) }
-    var renditions by remember { mutableStateOf(initialOptions.createRenditions) }
     var queued by remember { mutableStateOf(false) }
 
     LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
@@ -323,15 +314,35 @@ private fun ImportScreen(
                 singleLine = true,
             )
             Spacer(Modifier.height(18.dp))
-            OptionRow("Tüm ses parçalarını al", "Orijinal, dublaj ve erişilebilir alternatif diller", allAudio) { allAudio = it }
-            OptionRow("Tüm altyazıları al", "Manuel ve otomatik altyazılar metadata ile saklanır", subtitles) { subtitles = it }
-            OptionRow("Orijinali sakla", "Kaynak dosya Release'de ayrıca korunur", keepOriginal) { keepOriginal = it }
-            OptionRow("Kalite sürümlerini oluştur", "1080p / 720p / 480p / 360p; asla upscale yapılmaz", renditions) { renditions = it }
+            ArchivePolicyRow(
+                "4K'ya kadar tüm kalite ve FPS sürümleri",
+                "Kaynakta bulunan 2160p/1440p/1080p/720p… ve 30/50/60 FPS varyantları native olarak alınır; 4K üstü alınmaz.",
+            )
+            ArchivePolicyRow(
+                "Tüm ses parçalarını al",
+                "Orijinal, dublaj ve erişilebilir alternatif diller aynı video Release'ine eklenir.",
+            )
+            ArchivePolicyRow(
+                "Tüm altyazıları al",
+                "Manuel ve otomatik altyazılar metadata ile aynı Release'te saklanır.",
+            )
+            ArchivePolicyRow(
+                "Tek video = tek GitHub Release",
+                "1.8 GiB chunk, kanal metadata/avatar/banner, katalog güncelleme ve doğrulama sonrası otomatik telefon temizliği.",
+            )
             Spacer(Modifier.height(18.dp))
             Button(
                 onClick = {
                     if (url.isNotBlank()) {
-                        onArchive(url.trim(), IngestOptions(allAudio, subtitles, keepOriginal, renditions))
+                        onArchive(
+                            url.trim(),
+                            IngestOptions(
+                                allAudioTracks = true,
+                                subtitles = true,
+                                keepOriginal = true,
+                                createRenditions = false,
+                            ),
+                        )
                         queued = true
                     }
                 },
@@ -347,15 +358,15 @@ private fun ImportScreen(
 }
 
 @Composable
-private fun OptionRow(title: String, subtitle: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
+private fun ArchivePolicyRow(title: String, subtitle: String) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Checkbox(checked = checked, onCheckedChange = onChecked)
+        Checkbox(checked = true, onCheckedChange = null)
         Column(modifier = Modifier.weight(1f)) {
             Text(title, fontWeight = FontWeight.SemiBold)
-            Text(subtitle, color = Color(0xFFAAAAAA), fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, color = Color(0xFFAAAAAA), fontSize = 12.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
         }
     }
 }
