@@ -1,0 +1,56 @@
+name: Apply seekable archive v2 patch
+
+on:
+  push:
+    branches: ["fix/seekable-archive-v020"]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[seekable-patch-done]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/seekable-archive-v020
+      - name: Patch ingest pipeline
+        shell: python
+        run: |
+          from pathlib import Path
+
+          engine_path = Path('android/app/src/main/java/com/thedrowned925/ytclone/ingest/YoutubeImportEngine.kt')
+          s = engine_path.read_text()
+          needle = '''                addOption("-f", format.id)\n                addOption("-o", File(jobDir, "${base}%(ext)s").absolutePath)'''
+          video = '''                addOption("-f", format.id)\n                addOption("--remux-video", ArchiveMediaSchema.VIDEO_CONTAINER)\n                addOption("-o", File(jobDir, "${base}%(ext)s").absolutePath)'''
+          audio = '''                addOption("-f", format.id)\n                addOption("--remux-video", ArchiveMediaSchema.AUDIO_CONTAINER)\n                addOption("-o", File(jobDir, "${base}%(ext)s").absolutePath)'''
+          if s.count(needle) != 2:
+              raise SystemExit(f'Expected exactly 2 media download option blocks, found {s.count(needle)}')
+          s = s.replace(needle, video, 1)
+          s = s.replace(needle, audio, 1)
+
+          manifest_needle = '''        put("schemaVersion", 5)\n        put("source", "youtube")'''
+          manifest_repl = '''        put("schemaVersion", 6)\n        put("archiveMediaSchemaVersion", ArchiveMediaSchema.VERSION)\n        put("seekableMedia", true)\n        put("mediaContainerPolicy", "lossless-matroska-remux")\n        put("source", "youtube")'''
+          if s.count(manifest_needle) != 1:
+              raise SystemExit('Manifest schema block did not match exactly once')
+          s = s.replace(manifest_needle, manifest_repl, 1)
+          engine_path.write_text(s)
+
+          worker_path = Path('android/app/src/main/java/com/thedrowned925/ytclone/ingest/YoutubeIngestWorker.kt')
+          w = worker_path.read_text()
+          worker_needle = '        val jobId = sha256(url).take(24)'
+          worker_repl = '        val jobId = sha256(ArchiveMediaSchema.stateKey(url)).take(24)'
+          if w.count(worker_needle) != 1:
+              raise SystemExit('Worker jobId block did not match exactly once')
+          worker_path.write_text(w.replace(worker_needle, worker_repl, 1))
+
+          # One-shot workflow: remove itself from the branch after a successful patch.
+          Path('.github/workflows/patch-seekable-v020.yml').unlink()
+      - name: Commit patch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix(android): lossless remux archives for reliable seek [seekable-patch-done]"
+          git push origin HEAD:fix/seekable-archive-v020
