@@ -1,0 +1,19 @@
+{
+  "name": "YTClone 925",
+  "short_name": "YTClone",
+  "description": "Kişisel video arşivi ve oynatma platformu",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0f0f0f",
+  "theme_color": "#0f0f0f",
+  "categories": ["entertainment", "video"],
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
