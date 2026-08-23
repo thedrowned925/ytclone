@@ -52,10 +52,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.thedrowned925.ytclone.catalog.LocalCatalogRepository
 import com.thedrowned925.ytclone.ingest.IngestOptions
 
 private val YTCloneColors: ColorScheme = darkColorScheme(
@@ -85,7 +87,11 @@ fun YTCloneApp(
     tokenConfigured: Boolean,
     onSaveStorageSettings: (String, String?) -> Unit,
 ) {
+    val context = LocalContext.current
+    val catalogRepository = remember { LocalCatalogRepository(context) }
+    var catalog by remember { mutableStateOf(catalogRepository.listVideos()) }
     var selectedTab by remember { mutableStateOf(Tab.Home) }
+    var selectedVideo by remember { mutableStateOf<LocalCatalogRepository.Video?>(null) }
     var importUrl by remember { mutableStateOf("") }
     var settingsOpen by remember { mutableStateOf(false) }
 
@@ -97,7 +103,18 @@ fun YTCloneApp(
         }
     }
 
+    LaunchedEffect(selectedTab, selectedVideo) {
+        if (selectedTab == Tab.Home && selectedVideo == null) {
+            catalog = catalogRepository.listVideos()
+        }
+    }
+
     MaterialTheme(colorScheme = YTCloneColors) {
+        if (selectedVideo != null) {
+            PlayerScreen(video = selectedVideo!!, onBack = { selectedVideo = null })
+            return@MaterialTheme
+        }
+
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
             topBar = {
@@ -122,13 +139,9 @@ fun YTCloneApp(
                         IconButton(onClick = {}) { Icon(Icons.Default.Search, "Ara") }
                         IconButton(onClick = { settingsOpen = true }) {
                             Box(
-                                modifier = Modifier
-                                    .size(30.dp)
-                                    .background(Color(0xFF5C6BC0), CircleShape),
+                                modifier = Modifier.size(30.dp).background(Color(0xFF5C6BC0), CircleShape),
                                 contentAlignment = Alignment.Center,
-                            ) {
-                                Text("H", fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                            }
+                            ) { Text("H", fontWeight = FontWeight.Bold, fontSize = 13.sp) }
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -151,13 +164,9 @@ fun YTCloneApp(
                 }
             },
         ) { padding ->
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-            ) {
+            Box(modifier = Modifier.fillMaxSize().padding(padding)) {
                 when (selectedTab) {
-                    Tab.Home -> HomeScreen(onAdd = { selectedTab = Tab.Add })
+                    Tab.Home -> HomeScreen(catalog, onOpen = { selectedVideo = it }, onAdd = { selectedTab = Tab.Add })
                     Tab.Shorts -> SimplePage("Shorts", "Dikey videolar tam ekran kaydırmalı oynatılacak.")
                     Tab.Add -> ImportScreen(
                         url = importUrl,
@@ -166,7 +175,7 @@ fun YTCloneApp(
                         storageReady = mediaRepo.contains('/') && tokenConfigured,
                     )
                     Tab.Channels -> SimplePage("Kanallar", "İçe aktarılan videolar kaynak kanalına göre otomatik gruplanacak.")
-                    Tab.Library -> LibraryScreen()
+                    Tab.Library -> LibraryScreen(catalog, onOpen = { selectedVideo = it })
                 }
             }
         }
@@ -183,40 +192,83 @@ fun YTCloneApp(
 }
 
 @Composable
-private fun HomeScreen(onAdd: () -> Unit) {
-    val chips = listOf("Tümü", "Oyun", "Müzik", "Dublaj", "Belgesel", "Son eklenenler")
+private fun HomeScreen(
+    videos: List<LocalCatalogRepository.Video>,
+    onOpen: (LocalCatalogRepository.Video) -> Unit,
+    onAdd: () -> Unit,
+) {
+    val chips = listOf("Tümü", "Oyun", "Müzik", "Dublaj")
     LazyColumn(modifier = Modifier.fillMaxSize()) {
         item {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                chips.take(4).forEach { chip ->
+                chips.forEach { chip ->
                     Box(
-                        modifier = Modifier
-                            .background(Color(0xFF272727), RoundedCornerShape(8.dp))
-                            .padding(horizontal = 12.dp, vertical = 7.dp),
+                        modifier = Modifier.background(Color(0xFF272727), RoundedCornerShape(8.dp)).padding(horizontal = 12.dp, vertical = 7.dp),
                     ) { Text(chip, fontSize = 12.sp) }
                 }
             }
         }
-        item {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Spacer(Modifier.height(48.dp))
-                Icon(Icons.Default.VideoLibrary, null, modifier = Modifier.size(58.dp), tint = Color(0xFFAAAAAA))
-                Spacer(Modifier.height(16.dp))
-                Text("Kişisel YouTube arşivin", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                Text("YouTube'dan paylaş veya bağlantı yapıştır. Video, kanal, sesler, altyazılar ve kalite sürümleri Android'de hazırlanacak.", color = Color(0xFFAAAAAA))
-                Spacer(Modifier.height(22.dp))
-                Button(onClick = onAdd) { Text("İlk videoyu arşivle") }
+
+        if (videos.isEmpty()) {
+            item {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Spacer(Modifier.height(48.dp))
+                    Icon(Icons.Default.VideoLibrary, null, modifier = Modifier.size(58.dp), tint = Color(0xFFAAAAAA))
+                    Spacer(Modifier.height(16.dp))
+                    Text("Kişisel YouTube arşivin", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                    Text("YouTube'dan paylaş veya bağlantı yapıştır. Video, sesler, altyazılar ve kalite sürümleri Android'de hazırlanacak.", color = Color(0xFFAAAAAA))
+                    Spacer(Modifier.height(22.dp))
+                    Button(onClick = onAdd) { Text("İlk videoyu arşivle") }
+                }
+            }
+        } else {
+            items(videos, key = { it.id }) { video ->
+                VideoCard(video, onOpen)
+            }
+        }
+    }
+}
+
+@Composable
+private fun VideoCard(video: LocalCatalogRepository.Video, onOpen: (LocalCatalogRepository.Video) -> Unit) {
+    Column(modifier = Modifier.fillMaxWidth().padding(bottom = 18.dp)) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(210.dp)
+                .background(Color(0xFF202124)),
+            contentAlignment = Alignment.Center,
+        ) {
+            IconButton(onClick = { onOpen(video) }, modifier = Modifier.size(70.dp)) {
+                Icon(Icons.Default.PlayArrow, "Oynat", modifier = Modifier.size(52.dp), tint = Color.White)
+            }
+            Text(
+                formatDuration(video.durationSeconds),
+                modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp).background(Color(0xCC000000), RoundedCornerShape(4.dp)).padding(horizontal = 5.dp, vertical = 2.dp),
+                fontSize = 11.sp,
+            )
+        }
+        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Box(
+                modifier = Modifier.size(38.dp).background(Color(0xFF5C6BC0), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) { Text(video.channel.take(1).uppercase(), fontWeight = FontWeight.Bold) }
+            Column(modifier = Modifier.weight(1f).padding(start = 10.dp)) {
+                Text(video.title, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(
+                    "${video.channel} · ${video.qualities.size} kalite · ${video.audioTracks.size} ses · ${video.status}",
+                    color = Color(0xFFAAAAAA),
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }
@@ -235,70 +287,44 @@ private fun ImportScreen(
     var renditions by remember { mutableStateOf(true) }
     var queued by remember { mutableStateOf(false) }
 
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 16.dp),
-    ) {
+    LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         item {
             Text("Video arşivle", fontSize = 28.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 18.dp))
             Text("YouTube uygulamasında Paylaş → YTClone da kullanabilirsin.", color = Color(0xFFAAAAAA), modifier = Modifier.padding(top = 6.dp, bottom = 18.dp))
-
             if (!storageReady) {
                 Text(
-                    "GitHub depolama henüz ayarlı değil. Video telefonda hazırlanabilir; yüklemek için sağ üstteki H profilinden repo ve token'ı kaydet.",
+                    "GitHub depolama ayarlı değil. Sağ üstteki H profilinden repo ve token'ı kaydet.",
                     color = Color(0xFFFFB74D),
                     modifier = Modifier.padding(bottom = 12.dp),
                 )
             }
-
             OutlinedTextField(
                 value = url,
-                onValueChange = {
-                    queued = false
-                    onUrlChange(it)
-                },
+                onValueChange = { queued = false; onUrlChange(it) },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("Video bağlantısı") },
                 placeholder = { Text("https://youtube.com/watch?v=…") },
                 singleLine = true,
             )
-
             Spacer(Modifier.height(18.dp))
             OptionRow("Tüm ses parçalarını al", "Orijinal, dublaj ve erişilebilir alternatif diller", allAudio) { allAudio = it }
             OptionRow("Tüm altyazıları al", "Manuel ve otomatik altyazılar metadata ile saklanır", subtitles) { subtitles = it }
             OptionRow("Orijinali sakla", "Kaynak dosya Release'de ayrıca korunur", keepOriginal) { keepOriginal = it }
             OptionRow("Kalite sürümlerini oluştur", "1080p / 720p / 480p / 360p; asla upscale yapılmaz", renditions) { renditions = it }
-
             Spacer(Modifier.height(18.dp))
             Button(
                 onClick = {
                     if (url.isNotBlank()) {
-                        onArchive(
-                            url.trim(),
-                            IngestOptions(
-                                allAudioTracks = allAudio,
-                                subtitles = subtitles,
-                                keepOriginal = keepOriginal,
-                                createRenditions = renditions,
-                            ),
-                        )
+                        onArchive(url.trim(), IngestOptions(allAudio, subtitles, keepOriginal, renditions))
                         queued = true
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = url.isNotBlank(),
-            ) {
-                Text("Android'de indir ve arşivle")
-            }
-
+            ) { Text("Android'de indir ve arşivle") }
             if (queued) {
                 Text(
-                    if (storageReady) {
-                        "İş kuyruğa eklendi. Bildirimden indirme → işleme → 1.8 GiB chunk → GitHub yükleme durumunu takip edebilirsin."
-                    } else {
-                        "İş kuyruğa eklendi. Medya telefonda hazırlanacak ve GitHub ayarı yapılınca yüklenmeye hazır kalacak."
-                    },
+                    if (storageReady) "İş kuyruğa eklendi: indir → işle → 1.8 GiB chunk → GitHub." else "İş kuyruğa eklendi; medya telefonda hazırlanacak.",
                     color = Color(0xFF81C784),
                     modifier = Modifier.padding(vertical = 14.dp),
                 )
@@ -309,12 +335,7 @@ private fun ImportScreen(
 
 @Composable
 private fun OptionRow(title: String, subtitle: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
         Checkbox(checked = checked, onCheckedChange = onChecked)
         Column(modifier = Modifier.weight(1f)) {
             Text(title, fontWeight = FontWeight.SemiBold)
@@ -324,7 +345,7 @@ private fun OptionRow(title: String, subtitle: String, checked: Boolean, onCheck
 }
 
 @Composable
-private fun LibraryScreen() {
+private fun LibraryScreen(videos: List<LocalCatalogRepository.Video>, onOpen: (LocalCatalogRepository.Video) -> Unit) {
     val rows = listOf(
         Triple(Icons.Default.History, "Geçmiş", "Kaldığın yerden devam et"),
         Triple(Icons.Default.Download, "İndirilenler", "İnternetsiz izle"),
@@ -333,16 +354,16 @@ private fun LibraryScreen() {
     LazyColumn(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         item { Text("Kitaplık", fontSize = 28.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 12.dp)) }
         items(rows) { (icon, title, subtitle) ->
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(icon, null, modifier = Modifier.size(28.dp))
                 Spacer(Modifier.size(18.dp))
-                Column {
-                    Text(title, fontWeight = FontWeight.SemiBold)
-                    Text(subtitle, color = Color(0xFFAAAAAA), fontSize = 12.sp)
-                }
+                Column { Text(title, fontWeight = FontWeight.SemiBold); Text(subtitle, color = Color(0xFFAAAAAA), fontSize = 12.sp) }
+            }
+        }
+        item { Text("Videolar", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 18.dp, bottom = 8.dp)) }
+        items(videos, key = { it.id }) { video ->
+            Button(onClick = { onOpen(video) }, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                Text(video.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
     }
@@ -355,4 +376,12 @@ private fun SimplePage(title: String, text: String) {
         Spacer(Modifier.height(10.dp))
         Text(text, color = Color(0xFFAAAAAA))
     }
+}
+
+private fun formatDuration(seconds: Double): String {
+    val total = seconds.toLong().coerceAtLeast(0L)
+    val hours = total / 3600
+    val minutes = (total % 3600) / 60
+    val secs = total % 60
+    return if (hours > 0) "%d:%02d:%02d".format(hours, minutes, secs) else "%d:%02d".format(minutes, secs)
 }
