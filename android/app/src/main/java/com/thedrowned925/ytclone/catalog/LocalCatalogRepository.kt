@@ -9,6 +9,7 @@ class LocalCatalogRepository(context: Context) {
     data class Quality(
         val id: String,
         val height: Int,
+        val fps: Int,
         val logicalName: String,
         val localFile: File?,
     )
@@ -42,10 +43,7 @@ class LocalCatalogRepository(context: Context) {
             ?.asSequence()
             ?.filter { it.isDirectory }
             ?.mapNotNull(::readVideo)
-            ?.sortedByDescending { video ->
-                val manifest = File(ingestRoot, video.id)
-                manifest.lastModified()
-            }
+            ?.sortedByDescending { video -> File(ingestRoot, video.id).lastModified() }
             ?.toList()
             ?: emptyList()
     }
@@ -64,7 +62,8 @@ class LocalCatalogRepository(context: Context) {
             val file = File(jobDir, logicalName).takeIf { it.exists() && it.length() > 0L }
             qualities += Quality(
                 id = key,
-                height = item.optInt("height", key.removeSuffix("p").toIntOrNull() ?: 0),
+                height = item.optInt("height", key.takeWhile { it.isDigit() }.toIntOrNull() ?: 0),
+                fps = item.optInt("fps", 30).coerceAtLeast(1),
                 logicalName = logicalName,
                 localFile = file,
             )
@@ -75,7 +74,13 @@ class LocalCatalogRepository(context: Context) {
                 val logicalName = source.optString("logicalName")
                 if (logicalName.isNotBlank()) {
                     val file = File(jobDir, logicalName).takeIf { it.exists() && it.length() > 0L }
-                    qualities += Quality("source", source.optInt("height"), logicalName, file)
+                    qualities += Quality(
+                        id = "source",
+                        height = source.optInt("height"),
+                        fps = source.optInt("fps", 30),
+                        logicalName = logicalName,
+                        localFile = file,
+                    )
                 }
             }
         }
@@ -98,7 +103,11 @@ class LocalCatalogRepository(context: Context) {
         }
 
         val thumbnail = jobDir.listFiles()
-            ?.firstOrNull { file -> file.isFile && file.extension.lowercase() in setOf("webp", "jpg", "jpeg", "png") }
+            ?.firstOrNull { file ->
+                file.isFile &&
+                    file.name.startsWith("video.") &&
+                    file.extension.lowercase() in setOf("webp", "jpg", "jpeg", "png")
+            }
 
         Video(
             id = jobDir.name,
@@ -108,7 +117,7 @@ class LocalCatalogRepository(context: Context) {
             status = json.optString("status", "processing"),
             thumbnailFile = thumbnail,
             primaryReleaseTag = json.optJSONObject("storage")?.optString("primaryReleaseTag")?.takeIf(String::isNotBlank),
-            qualities = qualities.sortedWith(compareByDescending<Quality> { it.height }.thenBy { it.id }),
+            qualities = qualities.sortedWith(compareByDescending<Quality> { it.height }.thenByDescending { it.fps }.thenBy { it.id }),
             audioTracks = audioTracks.sortedWith(compareByDescending<Audio> { it.isDefault }.thenBy { it.language }.thenBy { it.label }),
         )
     }.getOrNull()
