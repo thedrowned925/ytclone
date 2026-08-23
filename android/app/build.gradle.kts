@@ -1,5 +1,6 @@
 plugins {
     id("com.android.application")
+    id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
@@ -39,6 +40,7 @@ dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2026.08.00")
     implementation(composeBom)
 
+    implementation("androidx.core:core-ktx:1.19.0")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
@@ -60,8 +62,8 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.11.2")
     implementation("com.squareup.okhttp3:okhttp-android:5.1.0")
 
-    // Current Android-native yt-dlp wrapper. The compat artifact preserves the
-    // familiar YoutubeDL/YoutubeDLRequest API while using Python 3.13 in-process.
+    // Android-native yt-dlp. The compat artifact exposes the familiar
+    // YoutubeDL/YoutubeDLRequest aliases in dev.ffmpegkit_maintained.ytdlp.compat.
     implementation("dev.ffmpegkit-maintained:yt-dlp-android:2.0.2")
     implementation("dev.ffmpegkit-maintained:yt-dlp-android-compat:2.0.2")
 }
