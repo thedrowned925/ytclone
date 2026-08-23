@@ -14,11 +14,15 @@ import javax.crypto.spec.GCMParameterSpec
 class SettingsStore(context: Context) {
     private val prefs = context.getSharedPreferences("ytclone_settings", Context.MODE_PRIVATE)
 
-    fun saveMediaRepo(repo: String) {
-        prefs.edit().putString(KEY_REPO, repo.trim()).apply()
-    }
+    /**
+     * YTClone currently stores both the Android app and its media Releases in the
+     * same repository. Keep this automatic so the only secret the user needs to
+     * enter is the GitHub token.
+     */
+    fun mediaRepo(): String = DEFAULT_MEDIA_REPO
 
-    fun mediaRepo(): String = prefs.getString(KEY_REPO, "") ?: ""
+    /** Kept for compatibility with older UI/call sites; repo is intentionally fixed. */
+    fun saveMediaRepo(@Suppress("UNUSED_PARAMETER") repo: String) = Unit
 
     fun saveGitHubToken(token: String) {
         if (token.isBlank()) {
@@ -69,7 +73,7 @@ class SettingsStore(context: Context) {
         createRenditions = prefs.getBoolean(KEY_RENDITIONS, true),
     )
 
-    fun isConfigured(): Boolean = mediaRepo().contains('/') && !gitHubToken().isNullOrBlank()
+    fun isConfigured(): Boolean = !gitHubToken().isNullOrBlank()
 
     private fun secretKey(): SecretKey {
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
@@ -91,11 +95,12 @@ class SettingsStore(context: Context) {
     }
 
     companion object {
+        const val DEFAULT_MEDIA_REPO = "thedrowned925/ytclone"
+
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
         private const val KEY_ALIAS = "ytclone-github-token"
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val IV_LENGTH = 12
-        private const val KEY_REPO = "media_repo"
         private const val KEY_TOKEN = "github_token"
         private const val KEY_LAST_INGEST_WORK_ID = "last_ingest_work_id"
         private const val KEY_ALL_AUDIO = "ingest_all_audio"
