@@ -17,7 +17,20 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Install dependencies
+      - name: Install web dependencies
         run: npm install
-      - name: Build
+      - name: Build Android-first web app
         run: npm run build
+      - name: Syntax-check local uploader engine
+        run: |
+          node --check uploader/src/index.mjs
+          node --check uploader/src/commands.mjs
+          node --check uploader/src/pipeline.mjs
+          node --check uploader/src/github.mjs
+      - name: Syntax-check trusted API
+        run: |
+          node --check server/src/index.mjs
+          node --check server/src/chunked-release.mjs
+
+# Important: CI intentionally does NOT download videos, run FFmpeg transcodes,
+# or upload media. Heavy media work belongs to the owner's local YTClone Uploader.
