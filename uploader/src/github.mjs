@@ -4,6 +4,8 @@ import path from 'node:path'
 
 const GITHUB_API = 'https://api.github.com'
 const GITHUB_ASSET_LIMIT_BYTES = 2 * 1024 * 1024 * 1024
+const GITHUB_RELEASE_ASSET_LIMIT = 1000
+const RESERVED_RELEASE_ASSETS = 10
 // Stay comfortably below GitHub's 2 GiB per-asset limit.
 export const CHUNK_SIZE_BYTES = Math.floor(1.8 * 1024 * 1024 * 1024)
 
@@ -31,9 +33,14 @@ async function githubJson(token, url, options = {}) {
 }
 
 async function getOrCreateRelease({ token, owner, repo, tag, title }) {
-  const releases = await githubJson(token, `${GITHUB_API}/repos/${owner}/${repo}/releases?per_page=100`)
-  const existing = releases.find((release) => release.tag_name === tag)
-  if (existing) return existing
+  // Draft releases are included for authenticated users. Paginate so an older
+  // unfinished upload can still be resumed even when the repository has many releases.
+  for (let page = 1; page <= 100; page += 1) {
+    const releases = await githubJson(token, `${GITHUB_API}/repos/${owner}/${repo}/releases?per_page=100&page=${page}`)
+    const existing = releases.find((release) => release.tag_name === tag)
+    if (existing) return existing
+    if (releases.length < 100) break
+  }
 
   return githubJson(token, `${GITHUB_API}/repos/${owner}/${repo}/releases`, {
     method: 'POST',
@@ -46,6 +53,19 @@ async function getOrCreateRelease({ token, owner, repo, tag, title }) {
       prerelease: false,
     }),
   })
+}
+
+async function listReleaseAssets({ token, owner, repo, releaseId }) {
+  const assets = []
+  for (let page = 1; page <= 10; page += 1) {
+    const batch = await githubJson(
+      token,
+      `${GITHUB_API}/repos/${owner}/${repo}/releases/${releaseId}/assets?per_page=100&page=${page}`,
+    )
+    assets.push(...batch)
+    if (batch.length < 100) break
+  }
+  return assets
 }
 
 async function deleteAsset({ token, owner, repo, assetId }) {
@@ -123,38 +143,40 @@ function planFile(file) {
   }
 }
 
-async function uploadPlannedPart({ token, owner, repo, release, file, part }) {
-  const existing = (release.assets || []).find((asset) => asset.name === part.name)
+async function uploadPlannedPart({ token, owner, repo, releaseId, assetMap, file, part }) {
+  const existing = assetMap.get(part.name)
   if (existing && Number(existing.size) === part.length) {
     console.log(`✓ zaten yüklü: ${part.name}`)
-    return release
+    return
   }
 
   if (existing) {
     console.log(`↻ değişen asset yeniden yükleniyor: ${part.name}`)
     await deleteAsset({ token, owner, repo, assetId: existing.id })
+    assetMap.delete(part.name)
   }
 
   console.log(`↑ ${part.name} (${(part.length / 1024 / 1024).toFixed(1)} MiB)`)
-  await uploadAssetStream({
+  const uploaded = await uploadAssetStream({
     token,
     owner,
     repo,
-    releaseId: release.id,
+    releaseId,
     filePath: file.filePath,
     name: part.name,
     start: part.start,
     length: part.length,
   })
-
-  return githubJson(token, `${GITHUB_API}/repos/${owner}/${repo}/releases/${release.id}`)
+  assetMap.set(uploaded.name, uploaded)
 }
 
 export async function publishDirectory({ outputDir, manifest, repo: repoValue, token }) {
   if (!token) throw new Error('YTCLONE_GITHUB_TOKEN ayarlı değil.')
   const { owner, repo } = parseRepo(repoValue)
   const tag = `ytclone-${manifest.id}`
-  let release = await getOrCreateRelease({ token, owner, repo, tag, title: manifest.title })
+  const release = await getOrCreateRelease({ token, owner, repo, tag, title: manifest.title })
+  const existingAssets = await listReleaseAssets({ token, owner, repo, releaseId: release.id })
+  const assetMap = new Map(existingAssets.map((asset) => [asset.name, asset]))
 
   const names = (await fsp.readdir(outputDir)).sort()
   const files = []
@@ -166,15 +188,24 @@ export async function publishDirectory({ outputDir, manifest, repo: repoValue, t
     if (stat.isFile()) files.push({ name, filePath, size: stat.size })
   }
 
+  const plans = files.map((file) => ({ file, plan: planFile(file) }))
+  const plannedAssetCount = plans.reduce((sum, entry) => sum + entry.plan.parts.length, 0) + 1 // storage-manifest.json
+  const safeAssetCeiling = GITHUB_RELEASE_ASSET_LIMIT - RESERVED_RELEASE_ASSETS
+  if (plannedAssetCount > safeAssetCeiling) {
+    throw new Error(
+      `Bu video ${plannedAssetCount} Release asset gerektiriyor; güvenli tek-Release sınırı ${safeAssetCeiling}. `
+      + 'Bir sonraki storage sürümünde video birden fazla Release shardına dağıtılmalı.',
+    )
+  }
+
   const storageFiles = []
-  for (const file of files) {
-    const plan = planFile(file)
+  for (const { file, plan } of plans) {
     if (plan.chunked) {
       console.log(`↳ ${file.name}: ${plan.parts.length} parça × en fazla ${(CHUNK_SIZE_BYTES / 1024 / 1024 / 1024).toFixed(1)} GiB`)
     }
 
     for (const part of plan.parts) {
-      release = await uploadPlannedPart({ token, owner, repo, release, file, part })
+      await uploadPlannedPart({ token, owner, repo, releaseId: release.id, assetMap, file, part })
     }
 
     storageFiles.push({
@@ -202,7 +233,15 @@ export async function publishDirectory({ outputDir, manifest, repo: repoValue, t
   const storageStat = await fsp.stat(storageManifestPath)
   const storageFile = { name: 'storage-manifest.json', filePath: storageManifestPath, size: storageStat.size }
   const storagePlan = planFile(storageFile)
-  release = await uploadPlannedPart({ token, owner, repo, release, file: storageFile, part: storagePlan.parts[0] })
+  await uploadPlannedPart({
+    token,
+    owner,
+    repo,
+    releaseId: release.id,
+    assetMap,
+    file: storageFile,
+    part: storagePlan.parts[0],
+  })
 
   const published = await publishRelease({ token, owner, repo, releaseId: release.id, title: manifest.title })
   return {
@@ -211,6 +250,6 @@ export async function publishDirectory({ outputDir, manifest, repo: repoValue, t
     url: published.html_url,
     chunkSizeBytes: CHUNK_SIZE_BYTES,
     files: storageFiles,
-    assets: published.assets || [],
+    assetCount: assetMap.size,
   }
 }
