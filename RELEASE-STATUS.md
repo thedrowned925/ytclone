@@ -1,6 +1,6 @@
 # Android Release Status
 
-- Release: v0.1.1
-- Asset: YTClone-0.1.1-debug.apk
+- Release: v0.1.2
+- Asset: YTClone-0.1.2-debug.apk
 - Status: published successfully
-- Source commit: c319b19c405a5b81def02b457c4a1867d23d6b21
+- Source commit: 5ba6c9da4a1c13c4ca7471608c0a5a6e0bb84684
