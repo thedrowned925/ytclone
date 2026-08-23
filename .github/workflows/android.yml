@@ -80,27 +80,27 @@ jobs:
 
       - name: Prepare release APK
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk YTClone-0.1.4-debug.apk
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk YTClone-0.1.5-debug.apk
 
-      - name: Publish GitHub Release v0.1.4
+      - name: Publish GitHub Release v0.1.5
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view v0.1.4 >/dev/null 2>&1; then
-            gh release upload v0.1.4 YTClone-0.1.4-debug.apk --clobber
+          if gh release view v0.1.5 >/dev/null 2>&1; then
+            gh release upload v0.1.5 YTClone-0.1.5-debug.apk --clobber
           else
-            gh release create v0.1.4 YTClone-0.1.4-debug.apk \
-              --title "YTClone v0.1.4 - Ingest Retry Loop Fix" \
-              --notes "Arşiv işinin kalite indirme aşamasında hata alınca metadata başına dönüp WorkManager tarafından tekrar tekrar başlatılması düzeltildi. Artık tüm pipeline için Result.retry kullanılmaz. yt-dlp ağ/fragment retry ve continue işlemlerini aynı kalite dosyası üzerinde yapar; tamamlanmış kalite ve ses dosyaları Download/YTClone/Working altında bulunursa tekrar indirilmeden atlanır. Hata olursa gerçek kalite/aşama kırmızı olarak ekranda kalır. v0.1.3 ile aynı Android imzasını kullanır ve normal güncelleme olarak kurulabilir."
+            gh release create v0.1.5 YTClone-0.1.5-debug.apk \
+              --title "YTClone v0.1.5 - Robust YouTube Ingest" \
+              --notes "HTTP 429 altyazı hataları artık video arşivlemeyi durdurmaz. Video ve ses kritik payload olarak önce indirilir; altyazı, thumbnail, kanal avatar/banner ve zengin kanal metadata'sı best-effort yardımcı öğelerdir. Yardımcı ağ istekleri Retry-After + exponential backoff ile tekrar denenir ve başarısız olanlar manifest warnings alanına kaydedilerek iş devam eder. --sub-langs all kaldırıldı; tüm gerçek/manüel altyazılar ve yalnız kaynak/orijinal otomatik altyazı track'leri saklanır, yüzlerce on-demand çeviri isteğiyle YouTube rate-limit'i tetiklenmez. yt-dlp video indirmede continue + 10 retry + 10 fragment retry + 5 extractor retry kullanmaya devam eder. v0.1.4 ile aynı Android imzasını kullanır."
           fi
 
       - name: Record successful release publication
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          printf '# Android Release Status\n\n- Release: v0.1.4\n- Asset: YTClone-0.1.4-debug.apk\n- Status: published successfully\n- Source commit: %s\n' "$GITHUB_SHA" > RELEASE-STATUS.md
+          printf '# Android Release Status\n\n- Release: v0.1.5\n- Asset: YTClone-0.1.5-debug.apk\n- Status: published successfully\n- Source commit: %s\n' "$GITHUB_SHA" > RELEASE-STATUS.md
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add RELEASE-STATUS.md
-          git diff --cached --quiet || git commit -m "chore: record v0.1.4 release publication [skip ci]"
+          git diff --cached --quiet || git commit -m "chore: record v0.1.5 release publication [skip ci]"
           git push
