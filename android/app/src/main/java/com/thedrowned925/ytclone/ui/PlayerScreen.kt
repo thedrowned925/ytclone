@@ -6,6 +6,7 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Environment
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -47,6 +48,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -105,6 +107,10 @@ fun PlayerScreen(
     val context = LocalContext.current
     val player = remember { PlaybackManager.player(context) }
     val playlistStore = remember { PlaylistStore(context) }
+    val metadataDurationMs = remember(video.id, video.durationSeconds) {
+        (video.durationSeconds * 1000.0).toLong().coerceAtLeast(0L)
+    }
+
     var quality by remember(video.id) { mutableStateOf(video.qualities.firstOrNull()) }
     var audio by remember(video.id) { mutableStateOf(video.audioTracks.firstOrNull { it.isDefault } ?: video.audioTracks.firstOrNull()) }
     var subtitle by remember(video.id) { mutableStateOf<LocalCatalogRepository.Subtitle?>(null) }
@@ -112,7 +118,9 @@ fun PlayerScreen(
     var controlsVisible by remember(video.id) { mutableStateOf(true) }
     var isPlaying by remember { mutableStateOf(player.isPlaying) }
     var position by remember(video.id) { mutableLongStateOf(PlaybackManager.position(video.id)) }
-    var duration by remember(video.id) { mutableLongStateOf(player.duration.takeIf { it > 0 } ?: 0L) }
+    var duration by remember(video.id) {
+        mutableLongStateOf(player.duration.takeIf { it > 0 } ?: metadataDurationMs)
+    }
     var speed by remember(video.id) { mutableStateOf(player.playbackParameters.speed) }
     var menu by remember { mutableStateOf<PlayerMenu?>(null) }
     var fullscreen by remember { mutableStateOf(false) }
@@ -123,18 +131,33 @@ fun PlayerScreen(
     var newPlaylistName by remember { mutableStateOf("") }
     var feedback by remember { mutableStateOf<String?>(null) }
 
-    // PiP eligibility is tied to being on a video screen, not to play/pause state.
+    BackHandler {
+        if (fullscreen) fullscreen = false else onBack()
+    }
+
     DisposableEffect(video.id) {
         onPlaybackActiveChanged(true)
         onDispose { onPlaybackActiveChanged(false) }
     }
 
-    DisposableEffect(player) {
+    DisposableEffect(player, video.id) {
         val listener = object : Player.Listener {
-            override fun onIsPlayingChanged(value: Boolean) { isPlaying = value }
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                duration = player.duration.takeIf { it > 0 } ?: duration
+            override fun onIsPlayingChanged(value: Boolean) {
+                isPlaying = value
             }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                duration = player.duration.takeIf { it > 0 } ?: metadataDurationMs.coerceAtLeast(duration)
+                if (playbackState == Player.STATE_READY) {
+                    PlaybackManager.retryPendingSeek(video.id)
+                }
+            }
+
+            override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+                duration = player.duration.takeIf { it > 0 } ?: metadataDurationMs.coerceAtLeast(duration)
+                PlaybackManager.retryPendingSeek(video.id)
+            }
+
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                 sourceError = error.errorCodeName + ": " + (error.message ?: "Oynatma hatası")
             }
@@ -143,15 +166,15 @@ fun PlayerScreen(
         onDispose { player.removeListener(listener) }
     }
 
-    LaunchedEffect(player, video.id) {
+    LaunchedEffect(player, video.id, metadataDurationMs) {
         while (true) {
             if (PlaybackManager.isActive(video.id)) {
-                val now = player.currentPosition.coerceAtLeast(0L)
-                if (!isScrubbing) position = now
-                PlaybackManager.rememberPosition(video.id, now)
-                duration = player.duration.takeIf { it > 0 } ?: duration
+                val raw = player.currentPosition.coerceAtLeast(0L)
+                PlaybackManager.rememberPosition(video.id, raw)
+                if (!isScrubbing) position = PlaybackManager.position(video.id)
+                duration = player.duration.takeIf { it > 0 } ?: metadataDurationMs.coerceAtLeast(duration)
             }
-            delay(300)
+            delay(250)
         }
     }
 
@@ -183,10 +206,12 @@ fun PlayerScreen(
     }
 
     fun seekTo(target: Long) {
-        val bounded = if (duration > 0) target.coerceIn(0L, duration) else target.coerceAtLeast(0L)
+        val effectiveDuration = duration.takeIf { it > 0 } ?: metadataDurationMs
+        val bounded = if (effectiveDuration > 0) target.coerceIn(0L, effectiveDuration) else target.coerceAtLeast(0L)
         PlaybackManager.seek(video.id, bounded)
         position = bounded
         scrubPosition = bounded
+        controlsVisible = true
     }
 
     if (isPipMode) {
@@ -199,14 +224,14 @@ fun PlayerScreen(
             onCaptions = {},
             onFullscreen = {},
             position = position,
-            duration = duration,
+            duration = duration.takeIf { it > 0 } ?: metadataDurationMs,
             isPlaying = isPlaying,
             isScrubbing = false,
             scrubPosition = position,
             onScrubChange = {},
             onScrubFinished = {},
             onPlayPause = { if (player.isPlaying) player.pause() else player.play() },
-            onSeekRelative = { delta -> seekTo(player.currentPosition + delta) },
+            onSeekRelative = { delta -> seekTo(PlaybackManager.position(video.id) + delta) },
             modifier = Modifier.fillMaxSize(),
         )
         return
@@ -223,7 +248,7 @@ fun PlayerScreen(
             onCaptions = { subtitle = if (subtitle == null) video.subtitles.firstOrNull() else null },
             onFullscreen = { fullscreen = !fullscreen },
             position = position,
-            duration = duration,
+            duration = duration.takeIf { it > 0 } ?: metadataDurationMs,
             isPlaying = isPlaying,
             isScrubbing = isScrubbing,
             scrubPosition = scrubPosition,
@@ -236,7 +261,7 @@ fun PlayerScreen(
                 isScrubbing = false
             },
             onPlayPause = { if (player.isPlaying) player.pause() else player.play() },
-            onSeekRelative = { delta -> seekTo(player.currentPosition + delta) },
+            onSeekRelative = { delta -> seekTo(PlaybackManager.position(video.id) + delta) },
             modifier = playerModifier,
         )
 
@@ -410,6 +435,9 @@ private fun PlayerSurface(
     onSeekRelative: (Long) -> Unit,
     modifier: Modifier,
 ) {
+    val safeDuration = duration.coerceAtLeast(1L)
+    val visiblePosition = (if (isScrubbing) scrubPosition else position).coerceIn(0L, safeDuration)
+
     Box(
         modifier = modifier.background(Color.Black).pointerInput(Unit) {
             detectTapGestures(
@@ -423,10 +451,11 @@ private fun PlayerSurface(
             update = { it.player = player },
             modifier = Modifier.fillMaxSize(),
         )
+
         if (controlsVisible) {
             Box(Modifier.fillMaxSize().background(Color(0x66000000))) {
                 Row(
-                    modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter).padding(4.dp),
+                    modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter).padding(horizontal = 4.dp, vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Geri", tint = Color.White) }
@@ -434,33 +463,45 @@ private fun PlayerSurface(
                     IconButton(onClick = onCaptions) { Icon(Icons.Default.ClosedCaption, "Altyazılar", tint = Color.White) }
                     IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "Ayarlar", tint = Color.White) }
                 }
+
                 Row(
                     modifier = Modifier.align(Alignment.Center),
-                    horizontalArrangement = Arrangement.spacedBy(28.dp),
+                    horizontalArrangement = Arrangement.spacedBy(24.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    IconButton(onClick = { onSeekRelative(-10_000L) }, modifier = Modifier.size(54.dp)) {
-                        Icon(Icons.Default.Replay10, "10 saniye geri", tint = Color.White, modifier = Modifier.size(38.dp))
+                    IconButton(onClick = { onSeekRelative(-10_000L) }, modifier = Modifier.size(50.dp)) {
+                        Icon(Icons.Default.Replay10, "10 saniye geri", tint = Color.White, modifier = Modifier.size(34.dp))
                     }
-                    IconButton(onClick = onPlayPause, modifier = Modifier.size(68.dp).background(Color(0xE6FFFFFF), CircleShape)) {
-                        Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = Color.Black, modifier = Modifier.size(42.dp))
+                    IconButton(onClick = onPlayPause, modifier = Modifier.size(62.dp).background(Color(0xE6FFFFFF), CircleShape)) {
+                        Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = Color.Black, modifier = Modifier.size(38.dp))
                     }
-                    IconButton(onClick = { onSeekRelative(10_000L) }, modifier = Modifier.size(54.dp)) {
-                        Icon(Icons.Default.Forward10, "10 saniye ileri", tint = Color.White, modifier = Modifier.size(38.dp))
+                    IconButton(onClick = { onSeekRelative(10_000L) }, modifier = Modifier.size(50.dp)) {
+                        Icon(Icons.Default.Forward10, "10 saniye ileri", tint = Color.White, modifier = Modifier.size(34.dp))
                     }
                 }
-                Column(modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
+
+                Column(
+                    modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 10.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.height(34.dp)) {
+                        Text("${formatMs(visiblePosition)} / ${formatMs(duration)}", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        Spacer(Modifier.weight(1f))
+                        IconButton(onClick = onFullscreen, modifier = Modifier.size(34.dp)) {
+                            Icon(Icons.Default.Fullscreen, "Tam ekran", tint = Color.White, modifier = Modifier.size(26.dp))
+                        }
+                    }
                     Slider(
-                        value = (if (isScrubbing) scrubPosition else position).coerceAtMost(duration.coerceAtLeast(1L)).toFloat(),
+                        value = visiblePosition.toFloat(),
                         onValueChange = { onScrubChange(it.toLong()) },
                         onValueChangeFinished = onScrubFinished,
-                        valueRange = 0f..duration.coerceAtLeast(1L).toFloat(),
+                        valueRange = 0f..safeDuration.toFloat(),
+                        modifier = Modifier.fillMaxWidth().height(24.dp),
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFFFF0033),
+                            activeTrackColor = Color(0xFFFF0033),
+                            inactiveTrackColor = Color.White.copy(alpha = 0.45f),
+                        ),
                     )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("${formatMs(if (isScrubbing) scrubPosition else position)} / ${formatMs(duration)}", color = Color.White, fontSize = 12.sp)
-                        Spacer(Modifier.weight(1f))
-                        IconButton(onClick = onFullscreen) { Icon(Icons.Default.Fullscreen, "Tam ekran", tint = Color.White) }
-                    }
                 }
             }
         }
