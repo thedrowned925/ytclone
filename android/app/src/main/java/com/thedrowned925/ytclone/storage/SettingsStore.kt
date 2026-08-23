@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import com.thedrowned925.ytclone.ingest.IngestOptions
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -46,6 +47,28 @@ class SettingsStore(context: Context) {
         }.getOrNull()
     }
 
+    fun saveLastIngestWorkId(workId: String) {
+        prefs.edit().putString(KEY_LAST_INGEST_WORK_ID, workId).apply()
+    }
+
+    fun lastIngestWorkId(): String? = prefs.getString(KEY_LAST_INGEST_WORK_ID, null)
+
+    fun saveIngestOptions(options: IngestOptions) {
+        prefs.edit()
+            .putBoolean(KEY_ALL_AUDIO, options.allAudioTracks)
+            .putBoolean(KEY_SUBTITLES, options.subtitles)
+            .putBoolean(KEY_KEEP_ORIGINAL, options.keepOriginal)
+            .putBoolean(KEY_RENDITIONS, options.createRenditions)
+            .apply()
+    }
+
+    fun ingestOptions(): IngestOptions = IngestOptions(
+        allAudioTracks = prefs.getBoolean(KEY_ALL_AUDIO, true),
+        subtitles = prefs.getBoolean(KEY_SUBTITLES, true),
+        keepOriginal = prefs.getBoolean(KEY_KEEP_ORIGINAL, true),
+        createRenditions = prefs.getBoolean(KEY_RENDITIONS, true),
+    )
+
     fun isConfigured(): Boolean = mediaRepo().contains('/') && !gitHubToken().isNullOrBlank()
 
     private fun secretKey(): SecretKey {
@@ -74,5 +97,10 @@ class SettingsStore(context: Context) {
         private const val IV_LENGTH = 12
         private const val KEY_REPO = "media_repo"
         private const val KEY_TOKEN = "github_token"
+        private const val KEY_LAST_INGEST_WORK_ID = "last_ingest_work_id"
+        private const val KEY_ALL_AUDIO = "ingest_all_audio"
+        private const val KEY_SUBTITLES = "ingest_subtitles"
+        private const val KEY_KEEP_ORIGINAL = "ingest_keep_original"
+        private const val KEY_RENDITIONS = "ingest_renditions"
     }
 }

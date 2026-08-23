@@ -30,6 +30,33 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Restore stable Android signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: ytclone-android-signing-v1-${{ runner.os }}
+
+      - name: Create signing key when missing
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            if [ -f "SIGNING-V1-INITIALIZED" ]; then
+              echo "::error::YTClone stable signing key cache is missing. Refusing to create a different key because Android updates would lose signature compatibility. Restore the original signing key before releasing another APK."
+              exit 1
+            fi
+            keytool -genkeypair -v \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=YTClone Android Update,O=YTClone,C=TR"
+          fi
+          keytool -list -v -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey | grep -E "SHA256:|Valid from" || true
+
       - name: Android SDK
         uses: android-actions/setup-android@v3
 
@@ -53,27 +80,29 @@ jobs:
 
       - name: Prepare release APK
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk YTClone-0.1.0-debug.apk
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk YTClone-0.1.1-debug.apk
 
-      - name: Publish GitHub Release v0.1.0
+      - name: Publish GitHub Release v0.1.1
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view v0.1.0 >/dev/null 2>&1; then
-            gh release upload v0.1.0 YTClone-0.1.0-debug.apk --clobber
+          if gh release view v0.1.1 >/dev/null 2>&1; then
+            gh release upload v0.1.1 YTClone-0.1.1-debug.apk --clobber
           else
-            gh release create v0.1.0 YTClone-0.1.0-debug.apk \
-              --title "YTClone v0.1.0 - Android Test" \
-              --notes "İlk Android test sürümü. YouTube paylaşım/import akışı, yerel arşivleme ve oynatıcı altyapısını cihaz üzerinde denemek için hazırlanmıştır. Bu bir debug/test APK'sıdır."
+            gh release create v0.1.1 YTClone-0.1.1-debug.apk \
+              --title "YTClone v0.1.1 - Android Progress Test" \
+              --notes "Android arşivleme ekranına canlı indirme/işleme/chunk/upload ilerlemesi eklendi. Son iş, GitHub repo/token ayarları ve ingest tercihleri uygulama güncellemelerinde korunur. Bu sürümden itibaren CI sabit bir Android imza anahtarı kullanır. v0.1.0 geçici CI debug anahtarıyla imzalandığı için v0.1.0'dan bu sürüme geçişte bir defalık kaldırıp yeniden kurma gerekebilir."
           fi
 
       - name: Record successful release publication
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          printf '# Android Release Status\n\n- Release: v0.1.0\n- Asset: YTClone-0.1.0-debug.apk\n- Status: published successfully\n- Source commit: %s\n' "$GITHUB_SHA" > RELEASE-STATUS.md
+          printf '# Android Release Status\n\n- Release: v0.1.1\n- Asset: YTClone-0.1.1-debug.apk\n- Status: published successfully\n- Source commit: %s\n' "$GITHUB_SHA" > RELEASE-STATUS.md
+          KEY_FINGERPRINT=$(keytool -list -v -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey | sed -n 's/.*SHA256: //p' | head -n 1)
+          printf 'YTClone Android stable signing initialized with v0.1.1\nSHA256: %s\n' "$KEY_FINGERPRINT" > SIGNING-V1-INITIALIZED
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add RELEASE-STATUS.md
-          git diff --cached --quiet || git commit -m "chore: record v0.1.0 release publication [skip ci]"
+          git add RELEASE-STATUS.md SIGNING-V1-INITIALIZED
+          git diff --cached --quiet || git commit -m "chore: record v0.1.1 release publication [skip ci]"
           git push

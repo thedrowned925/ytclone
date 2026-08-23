@@ -7,10 +7,11 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
+import com.thedrowned925.ytclone.storage.SettingsStore
 import java.security.MessageDigest
 
 object IngestQueue {
-    fun enqueue(context: Context, url: String, options: IngestOptions = IngestOptions()) {
+    fun enqueue(context: Context, url: String, options: IngestOptions = IngestOptions()): String {
         val request = OneTimeWorkRequestBuilder<YoutubeIngestWorker>()
             .setInputData(
                 Data.Builder()
@@ -34,6 +35,13 @@ object IngestQueue {
             ExistingWorkPolicy.KEEP,
             request,
         )
+
+        val workId = request.id.toString()
+        SettingsStore(context).apply {
+            saveLastIngestWorkId(workId)
+            saveIngestOptions(options)
+        }
+        return workId
     }
 
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
