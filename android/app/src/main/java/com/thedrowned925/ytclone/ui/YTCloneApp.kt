@@ -29,7 +29,7 @@ import androidx.compose.material.icons.filled.Subscriptions
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.DarkColorScheme
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -56,8 +56,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.thedrowned925.ytclone.ingest.IngestOptions
 
-private val YTCloneColors: DarkColorScheme = darkColorScheme(
+private val YTCloneColors: ColorScheme = darkColorScheme(
     primary = Color(0xFFFF0033),
     background = Color(0xFF0F0F0F),
     surface = Color(0xFF0F0F0F),
@@ -79,10 +80,14 @@ private enum class Tab(val title: String, val icon: ImageVector) {
 fun YTCloneApp(
     incomingUrl: String?,
     onIncomingUrlConsumed: () -> Unit,
-    onArchive: (String) -> Unit,
+    onArchive: (String, IngestOptions) -> Unit,
+    mediaRepo: String,
+    tokenConfigured: Boolean,
+    onSaveStorageSettings: (String, String?) -> Unit,
 ) {
     var selectedTab by remember { mutableStateOf(Tab.Home) }
     var importUrl by remember { mutableStateOf("") }
+    var settingsOpen by remember { mutableStateOf(false) }
 
     LaunchedEffect(incomingUrl) {
         if (!incomingUrl.isNullOrBlank()) {
@@ -115,14 +120,15 @@ fun YTCloneApp(
                         IconButton(onClick = {}) { Icon(Icons.Default.Cast, "Yayınla") }
                         IconButton(onClick = {}) { Icon(Icons.Default.Notifications, "Bildirimler") }
                         IconButton(onClick = {}) { Icon(Icons.Default.Search, "Ara") }
-                        Box(
-                            modifier = Modifier
-                                .padding(horizontal = 10.dp)
-                                .size(30.dp)
-                                .background(Color(0xFF5C6BC0), CircleShape),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text("H", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                        IconButton(onClick = { settingsOpen = true }) {
+                            Box(
+                                modifier = Modifier
+                                    .size(30.dp)
+                                    .background(Color(0xFF5C6BC0), CircleShape),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text("H", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                            }
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
@@ -157,11 +163,21 @@ fun YTCloneApp(
                         url = importUrl,
                         onUrlChange = { importUrl = it },
                         onArchive = onArchive,
+                        storageReady = mediaRepo.contains('/') && tokenConfigured,
                     )
                     Tab.Channels -> SimplePage("Kanallar", "İçe aktarılan videolar kaynak kanalına göre otomatik gruplanacak.")
                     Tab.Library -> LibraryScreen()
                 }
             }
+        }
+
+        if (settingsOpen) {
+            SettingsDialog(
+                initialRepo = mediaRepo,
+                tokenConfigured = tokenConfigured,
+                onDismiss = { settingsOpen = false },
+                onSave = onSaveStorageSettings,
+            )
         }
     }
 }
@@ -210,7 +226,8 @@ private fun HomeScreen(onAdd: () -> Unit) {
 private fun ImportScreen(
     url: String,
     onUrlChange: (String) -> Unit,
-    onArchive: (String) -> Unit,
+    onArchive: (String, IngestOptions) -> Unit,
+    storageReady: Boolean,
 ) {
     var allAudio by remember { mutableStateOf(true) }
     var subtitles by remember { mutableStateOf(true) }
@@ -227,6 +244,14 @@ private fun ImportScreen(
             Text("Video arşivle", fontSize = 28.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 18.dp))
             Text("YouTube uygulamasında Paylaş → YTClone da kullanabilirsin.", color = Color(0xFFAAAAAA), modifier = Modifier.padding(top = 6.dp, bottom = 18.dp))
 
+            if (!storageReady) {
+                Text(
+                    "GitHub depolama henüz ayarlı değil. Video telefonda hazırlanabilir; yüklemek için sağ üstteki H profilinden repo ve token'ı kaydet.",
+                    color = Color(0xFFFFB74D),
+                    modifier = Modifier.padding(bottom = 12.dp),
+                )
+            }
+
             OutlinedTextField(
                 value = url,
                 onValueChange = {
@@ -242,14 +267,22 @@ private fun ImportScreen(
             Spacer(Modifier.height(18.dp))
             OptionRow("Tüm ses parçalarını al", "Orijinal, dublaj ve erişilebilir alternatif diller", allAudio) { allAudio = it }
             OptionRow("Tüm altyazıları al", "Manuel ve otomatik altyazılar metadata ile saklanır", subtitles) { subtitles = it }
-            OptionRow("Orijinali sakla", "Kaynak dosya Release'de korunur", keepOriginal) { keepOriginal = it }
+            OptionRow("Orijinali sakla", "Kaynak dosya Release'de ayrıca korunur", keepOriginal) { keepOriginal = it }
             OptionRow("Kalite sürümlerini oluştur", "1080p / 720p / 480p / 360p; asla upscale yapılmaz", renditions) { renditions = it }
 
             Spacer(Modifier.height(18.dp))
             Button(
                 onClick = {
                     if (url.isNotBlank()) {
-                        onArchive(url.trim())
+                        onArchive(
+                            url.trim(),
+                            IngestOptions(
+                                allAudioTracks = allAudio,
+                                subtitles = subtitles,
+                                keepOriginal = keepOriginal,
+                                createRenditions = renditions,
+                            ),
+                        )
                         queued = true
                     }
                 },
@@ -261,7 +294,11 @@ private fun ImportScreen(
 
             if (queued) {
                 Text(
-                    "İş kuyruğa eklendi. Bildirimden indirme → işleme → 1.8 GiB chunk → GitHub yükleme durumunu takip edebileceksin.",
+                    if (storageReady) {
+                        "İş kuyruğa eklendi. Bildirimden indirme → işleme → 1.8 GiB chunk → GitHub yükleme durumunu takip edebilirsin."
+                    } else {
+                        "İş kuyruğa eklendi. Medya telefonda hazırlanacak ve GitHub ayarı yapılınca yüklenmeye hazır kalacak."
+                    },
                     color = Color(0xFF81C784),
                     modifier = Modifier.padding(vertical = 14.dp),
                 )
