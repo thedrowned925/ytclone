@@ -61,5 +61,9 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.11.2")
     implementation("com.squareup.okhttp3:okhttp-android:5.1.0")
 
-    implementation("dev.ffmpegkit-maintained:yt-dlp-android:2.0.2")
+    // Full Android yt-dlp wrapper: arbitrary yt-dlp CLI options, stdout JSON,
+    // process cancellation, and bundled ffmpeg support.
+    val youtubedlAndroid = "0.18.1"
+    implementation("io.github.junkfood02.youtubedl-android:library:$youtubedlAndroid")
+    implementation("io.github.junkfood02.youtubedl-android:ffmpeg:$youtubedlAndroid")
 }
