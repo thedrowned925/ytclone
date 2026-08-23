@@ -1,6 +1,7 @@
 package com.thedrowned925.ytclone.ui
 
 import android.graphics.BitmapFactory
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -126,6 +127,21 @@ fun YTCloneApp(
     var refreshing by remember { mutableStateOf(false) }
     var createPlaylistDialog by remember { mutableStateOf(false) }
     var createPlaylistName by remember { mutableStateOf("") }
+
+    BackHandler(
+        enabled = selectedVideo != null || selectedChannel != null || selectedPlaylist != null ||
+            searchOpen || settingsOpen || createPlaylistDialog || selectedTab != Tab.Home,
+    ) {
+        when {
+            settingsOpen -> settingsOpen = false
+            createPlaylistDialog -> createPlaylistDialog = false
+            selectedVideo != null -> selectedVideo = null
+            selectedChannel != null -> selectedChannel = null
+            selectedPlaylist != null -> selectedPlaylist = null
+            searchOpen -> searchOpen = false
+            selectedTab != Tab.Home -> selectedTab = Tab.Home
+        }
+    }
 
     suspend fun refreshCatalog() {
         if (!tokenConfigured || refreshing) return

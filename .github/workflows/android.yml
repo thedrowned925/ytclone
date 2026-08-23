@@ -62,25 +62,25 @@ jobs:
           if-no-files-found: error
       - name: Prepare release APK
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk YTClone-0.1.7-debug.apk
-      - name: Publish GitHub Release v0.1.7
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk YTClone-0.1.8-debug.apk
+      - name: Publish GitHub Release v0.1.8
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view v0.1.7 >/dev/null 2>&1; then
-            gh release upload v0.1.7 YTClone-0.1.7-debug.apk --clobber
+          if gh release view v0.1.8 >/dev/null 2>&1; then
+            gh release upload v0.1.8 YTClone-0.1.8-debug.apk --clobber
           else
-            gh release create v0.1.7 YTClone-0.1.7-debug.apk \
-              --title "YTClone v0.1.7 - Stable Player, Offline, Search & Playlists" \
-              --notes "Player seek ve kalite/ses/al­tyazı değişimlerinde oynatma konumunu video bazında korur; source switch doğrudan eski milisaniyede hazırlanır ve scrubber yalnız bırakıldığında seek yapar. Samsung/OEM PiP için explicit fallback eklendi; playback service task kapansa da yaşar ve MediaSession arka plan/bildirim kontrollerini sürdürür. Ana sayfa ve kanal sayfalarında gerçek kanal avatarları görünür; koyu tema metinleri açık renge sabitlendi. Arşiv içi arama, kalıcı oynatma listeleri ve seçili kalite+ses+altyazıyı Download/YTClone/Offline altına WorkManager ile arka planda indirme desteği eklendi. v0.1.5 ile aynı Android imzasını kullanır."
+            gh release create v0.1.8 YTClone-0.1.8-debug.apk \
+              --title "YTClone v0.1.8 - Player Seek & Back Navigation" \
+              --notes "Playbar/seek akışı yeniden düzenlendi. Video süresi Media3 henüz timeline vermediğinde katalog metadata süresinden alınır; scrub sırasında geçici 0ms değerleri hedef pozisyonu ezmez. PlaybackManager pending seek hedefini video bazında saklar ve READY/seekable timeline oluşunca tekrar uygular; kalite/ses/al­tyazı source switch aynı hedef milisaniyeyi korur. Player yerleşimi YouTube'a daha yakın hale getirildi: üst kontroller, orta 10sn geri/oynat/10sn ileri, altta zaman/tam ekran ve en dipte kırmızı playbar. Android sistem geri tuşu artık player, kanal, playlist, arama, ayarlar ve sekmeler arasında geri gider; yalnız ana sayfada uygulamadan çıkar. v0.1.7 ile aynı Android imzasını kullanır."
           fi
       - name: Record successful release publication
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          printf '# Android Release Status\n\n- Release: v0.1.7\n- Asset: YTClone-0.1.7-debug.apk\n- Status: published successfully\n- Source commit: %s\n' "$GITHUB_SHA" > RELEASE-STATUS.md
+          printf '# Android Release Status\n\n- Release: v0.1.8\n- Asset: YTClone-0.1.8-debug.apk\n- Status: published successfully\n- Source commit: %s\n' "$GITHUB_SHA" > RELEASE-STATUS.md
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add RELEASE-STATUS.md
-          git diff --cached --quiet || git commit -m "chore: record v0.1.7 release publication [skip ci]"
+          git diff --cached --quiet || git commit -m "chore: record v0.1.8 release publication [skip ci]"
           git push
