@@ -1,5 +1,18 @@
 import { Readable } from 'node:stream'
 
+const CACHE_TTL_MS = 5 * 60 * 1000
+const releaseCache = new Map()
+const manifestCache = new Map()
+
+function githubHeaders(token, accept = 'application/vnd.github+json') {
+  return {
+    Accept: accept,
+    Authorization: `Bearer ${token}`,
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'ytclone-server',
+  }
+}
+
 export function parseByteRange(header, totalSize) {
   if (!header) return { start: 0, end: totalSize - 1, partial: false }
   const match = /^bytes=(\d*)-(\d*)$/i.exec(String(header).trim())
@@ -83,26 +96,38 @@ async function writeStreamSlice(response, output, { skip = 0, take }) {
   if (remainingTake !== 0) throw new Error(`Upstream asset ended early; ${remainingTake} bytes missing`)
 }
 
+async function listReleaseAssets({ owner, repo, releaseId, token }) {
+  const assets = []
+  for (let page = 1; page <= 10; page += 1) {
+    const response = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/releases/${releaseId}/assets?per_page=100&page=${page}`,
+      { headers: githubHeaders(token) },
+    )
+    if (!response.ok) throw Object.assign(new Error(`GitHub asset list failed: ${response.status}`), { statusCode: response.status })
+    const batch = await response.json()
+    assets.push(...batch)
+    if (batch.length < 100) break
+  }
+  return assets
+}
+
 export async function fetchReleaseByTag({ owner, repo, tag, token }) {
+  const cacheKey = `${owner}/${repo}:${tag}`
+  const cached = releaseCache.get(cacheKey)
+  if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.value
+
   const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/releases/tags/${encodeURIComponent(tag)}`, {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      Authorization: `Bearer ${token}`,
-      'X-GitHub-Api-Version': '2022-11-28',
-      'User-Agent': 'ytclone-server',
-    },
+    headers: githubHeaders(token),
   })
   if (!response.ok) throw Object.assign(new Error(`GitHub release lookup failed: ${response.status}`), { statusCode: response.status })
-  return response.json()
+  const release = await response.json()
+  release.assets = await listReleaseAssets({ owner, repo, releaseId: release.id, token })
+  releaseCache.set(cacheKey, { at: Date.now(), value: release })
+  return release
 }
 
 export async function fetchAssetResponse({ owner, repo, assetId, token, start = null, end = null }) {
-  const requestHeaders = {
-    Accept: 'application/octet-stream',
-    Authorization: `Bearer ${token}`,
-    'X-GitHub-Api-Version': '2022-11-28',
-    'User-Agent': 'ytclone-server',
-  }
+  const requestHeaders = githubHeaders(token, 'application/octet-stream')
   if (start !== null && end !== null) requestHeaders.Range = `bytes=${start}-${end}`
 
   const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/releases/assets/${assetId}`, {
@@ -116,10 +141,16 @@ export async function fetchAssetResponse({ owner, repo, assetId, token, start = 
 }
 
 export async function loadStorageManifest({ owner, repo, release, token }) {
+  const cacheKey = `${owner}/${repo}:${release.id}:storage-manifest`
+  const cached = manifestCache.get(cacheKey)
+  if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.value
+
   const asset = (release.assets || []).find((item) => item.name === 'storage-manifest.json')
   if (!asset) throw new Error('storage-manifest.json asset is missing')
   const response = await fetchAssetResponse({ owner, repo, assetId: asset.id, token })
-  return response.json()
+  const manifest = await response.json()
+  manifestCache.set(cacheKey, { at: Date.now(), value: manifest })
+  return manifest
 }
 
 export async function streamLogicalFile({ req, res, owner, repo, release, storageManifest, logicalName, token, contentType = 'application/octet-stream' }) {
