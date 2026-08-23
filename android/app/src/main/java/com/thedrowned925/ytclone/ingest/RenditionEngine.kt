@@ -48,21 +48,44 @@ class RenditionEngine(private val context: Context) {
         return outputs
     }
 
+    suspend fun extractFallbackAudio(sourceVideo: File, outputDir: File): File {
+        val output = File(outputDir, "audio.001.fallback.mp4")
+        if (output.exists() && output.length() > 0L) return output
+        output.delete()
+
+        val item = EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(sourceVideo)))
+            .setRemoveVideo(true)
+            .build()
+        export(item, output, audioMimeType = MimeTypes.AUDIO_AAC)
+        return output
+    }
+
     private suspend fun exportVideoOnly(input: File, output: File, height: Int) {
+        val effects = Effects(
+            /* audioProcessors = */ emptyList(),
+            /* videoEffects = */ listOf<Effect>(Presentation.createForHeight(height)),
+        )
+        val item = EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(input)))
+            .setRemoveAudio(true)
+            .setEffects(effects)
+            .build()
+        export(item, output, videoMimeType = MimeTypes.VIDEO_H264)
+    }
+
+    private suspend fun export(
+        item: EditedMediaItem,
+        output: File,
+        videoMimeType: String? = null,
+        audioMimeType: String? = null,
+    ) {
         withContext(Dispatchers.Main.immediate) {
             suspendCancellableCoroutine { continuation ->
-                val effects = Effects(
-                    /* audioProcessors = */ emptyList(),
-                    /* videoEffects = */ listOf<Effect>(Presentation.createForHeight(height)),
-                )
-                val item = EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(input)))
-                    .setRemoveAudio(true)
-                    .setEffects(effects)
-                    .build()
-
                 lateinit var transformer: Transformer
-                transformer = Transformer.Builder(context)
-                    .setVideoMimeType(MimeTypes.VIDEO_H264)
+                val builder = Transformer.Builder(context)
+                if (videoMimeType != null) builder.setVideoMimeType(videoMimeType)
+                if (audioMimeType != null) builder.setAudioMimeType(audioMimeType)
+
+                transformer = builder
                     .addListener(
                         object : Transformer.Listener {
                             override fun onCompleted(composition: Composition, result: ExportResult) {
