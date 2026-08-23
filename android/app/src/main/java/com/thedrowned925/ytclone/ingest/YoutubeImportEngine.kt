@@ -195,9 +195,12 @@ class YoutubeImportEngine {
 
     private fun YoutubeDLRequest.commonOptions() {
         addOption("--no-playlist")
-        // YTClone owns the updater. Suppress yt-dlp's age warning so real extractor
-        // errors are visible in the UI instead of being buried below the warning.
+        // YTClone owns the yt-dlp updater, so its built-in age warning is noise.
         addOption("--no-update")
+        // Current YouTube playback uses JS challenges. The Android wrapper already
+        // bundles QuickJS; let yt-dlp fetch its official EJS solver scripts from
+        // the yt-dlp GitHub component source so signature solving stays current.
+        addOption("--remote-components", "ejs:github")
         addOption("--no-warnings")
     }
 
