@@ -59,6 +59,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.thedrowned925.ytclone.catalog.LocalCatalogRepository
 import com.thedrowned925.ytclone.ingest.IngestOptions
+import com.thedrowned925.ytclone.storage.SettingsStore
 
 private val YTCloneColors: ColorScheme = darkColorScheme(
     primary = Color(0xFFFF0033),
@@ -82,18 +83,21 @@ private enum class Tab(val title: String, val icon: ImageVector) {
 fun YTCloneApp(
     incomingUrl: String?,
     onIncomingUrlConsumed: () -> Unit,
-    onArchive: (String, IngestOptions) -> Unit,
+    onArchive: (String, IngestOptions) -> String,
     mediaRepo: String,
     tokenConfigured: Boolean,
     onSaveStorageSettings: (String, String?) -> Unit,
 ) {
     val context = LocalContext.current
     val catalogRepository = remember { LocalCatalogRepository(context) }
+    val settingsStore = remember { SettingsStore(context) }
     var catalog by remember { mutableStateOf(catalogRepository.listVideos()) }
     var selectedTab by remember { mutableStateOf(Tab.Home) }
     var selectedVideo by remember { mutableStateOf<LocalCatalogRepository.Video?>(null) }
     var importUrl by remember { mutableStateOf("") }
     var settingsOpen by remember { mutableStateOf(false) }
+    var activeWorkId by remember { mutableStateOf(settingsStore.lastIngestWorkId()) }
+    val savedIngestOptions = remember { settingsStore.ingestOptions() }
 
     LaunchedEffect(incomingUrl) {
         if (!incomingUrl.isNullOrBlank()) {
@@ -171,7 +175,11 @@ fun YTCloneApp(
                     Tab.Add -> ImportScreen(
                         url = importUrl,
                         onUrlChange = { importUrl = it },
-                        onArchive = onArchive,
+                        initialOptions = savedIngestOptions,
+                        activeWorkId = activeWorkId,
+                        onArchive = { url, options ->
+                            activeWorkId = onArchive(url, options)
+                        },
                         storageReady = mediaRepo.contains('/') && tokenConfigured,
                     )
                     Tab.Channels -> SimplePage("Kanallar", "İçe aktarılan videolar kaynak kanalına göre otomatik gruplanacak.")
@@ -223,15 +231,16 @@ private fun HomeScreen(
                     Spacer(Modifier.height(16.dp))
                     Text("Kişisel YouTube arşivin", fontSize = 22.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(8.dp))
-                    Text("YouTube'dan paylaş veya bağlantı yapıştır. Video, sesler, altyazılar ve kalite sürümleri Android'de hazırlanacak.", color = Color(0xFFAAAAAA))
+                    Text(
+                        "YouTube'dan paylaş veya bağlantı yapıştır. Video, sesler, altyazılar ve kalite sürümleri Android'de hazırlanacak.",
+                        color = Color(0xFFAAAAAA),
+                    )
                     Spacer(Modifier.height(22.dp))
                     Button(onClick = onAdd) { Text("İlk videoyu arşivle") }
                 }
             }
         } else {
-            items(videos, key = { it.id }) { video ->
-                VideoCard(video, onOpen)
-            }
+            items(videos, key = { it.id }) { video -> VideoCard(video, onOpen) }
         }
     }
 }
@@ -240,10 +249,7 @@ private fun HomeScreen(
 private fun VideoCard(video: LocalCatalogRepository.Video, onOpen: (LocalCatalogRepository.Video) -> Unit) {
     Column(modifier = Modifier.fillMaxWidth().padding(bottom = 18.dp)) {
         Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(210.dp)
-                .background(Color(0xFF202124)),
+            modifier = Modifier.fillMaxWidth().height(210.dp).background(Color(0xFF202124)),
             contentAlignment = Alignment.Center,
         ) {
             IconButton(onClick = { onOpen(video) }, modifier = Modifier.size(70.dp)) {
@@ -251,7 +257,11 @@ private fun VideoCard(video: LocalCatalogRepository.Video, onOpen: (LocalCatalog
             }
             Text(
                 formatDuration(video.durationSeconds),
-                modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp).background(Color(0xCC000000), RoundedCornerShape(4.dp)).padding(horizontal = 5.dp, vertical = 2.dp),
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(8.dp)
+                    .background(Color(0xCC000000), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 5.dp, vertical = 2.dp),
                 fontSize = 11.sp,
             )
         }
@@ -278,19 +288,25 @@ private fun VideoCard(video: LocalCatalogRepository.Video, onOpen: (LocalCatalog
 private fun ImportScreen(
     url: String,
     onUrlChange: (String) -> Unit,
+    initialOptions: IngestOptions,
+    activeWorkId: String?,
     onArchive: (String, IngestOptions) -> Unit,
     storageReady: Boolean,
 ) {
-    var allAudio by remember { mutableStateOf(true) }
-    var subtitles by remember { mutableStateOf(true) }
-    var keepOriginal by remember { mutableStateOf(true) }
-    var renditions by remember { mutableStateOf(true) }
+    var allAudio by remember { mutableStateOf(initialOptions.allAudioTracks) }
+    var subtitles by remember { mutableStateOf(initialOptions.subtitles) }
+    var keepOriginal by remember { mutableStateOf(initialOptions.keepOriginal) }
+    var renditions by remember { mutableStateOf(initialOptions.createRenditions) }
     var queued by remember { mutableStateOf(false) }
 
     LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         item {
             Text("Video arşivle", fontSize = 28.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 18.dp))
-            Text("YouTube uygulamasında Paylaş → YTClone da kullanabilirsin.", color = Color(0xFFAAAAAA), modifier = Modifier.padding(top = 6.dp, bottom = 18.dp))
+            Text(
+                "YouTube uygulamasında Paylaş → YTClone da kullanabilirsin.",
+                color = Color(0xFFAAAAAA),
+                modifier = Modifier.padding(top = 6.dp, bottom = 18.dp),
+            )
             if (!storageReady) {
                 Text(
                     "GitHub depolama ayarlı değil. Sağ üstteki H profilinden repo ve token'ı kaydet.",
@@ -320,22 +336,22 @@ private fun ImportScreen(
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = url.isNotBlank(),
-            ) { Text("Android'de indir ve arşivle") }
-            if (queued) {
-                Text(
-                    if (storageReady) "İş kuyruğa eklendi: indir → işle → 1.8 GiB chunk → GitHub." else "İş kuyruğa eklendi; medya telefonda hazırlanacak.",
-                    color = Color(0xFF81C784),
-                    modifier = Modifier.padding(vertical = 14.dp),
-                )
+                enabled = url.isNotBlank() && !queued,
+            ) {
+                Text(if (queued) "İş kuyruğa eklendi" else "Android'de indir ve arşivle")
             }
+
+            IngestProgressCard(activeWorkId)
         }
     }
 }
 
 @Composable
 private fun OptionRow(title: String, subtitle: String, checked: Boolean, onChecked: (Boolean) -> Unit) {
-    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Checkbox(checked = checked, onCheckedChange = onChecked)
         Column(modifier = Modifier.weight(1f)) {
             Text(title, fontWeight = FontWeight.SemiBold)
@@ -345,7 +361,10 @@ private fun OptionRow(title: String, subtitle: String, checked: Boolean, onCheck
 }
 
 @Composable
-private fun LibraryScreen(videos: List<LocalCatalogRepository.Video>, onOpen: (LocalCatalogRepository.Video) -> Unit) {
+private fun LibraryScreen(
+    videos: List<LocalCatalogRepository.Video>,
+    onOpen: (LocalCatalogRepository.Video) -> Unit,
+) {
     val rows = listOf(
         Triple(Icons.Default.History, "Geçmiş", "Kaldığın yerden devam et"),
         Triple(Icons.Default.Download, "İndirilenler", "İnternetsiz izle"),
@@ -354,10 +373,16 @@ private fun LibraryScreen(videos: List<LocalCatalogRepository.Video>, onOpen: (L
     LazyColumn(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         item { Text("Kitaplık", fontSize = 28.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 12.dp)) }
         items(rows) { (icon, title, subtitle) ->
-            Row(modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Icon(icon, null, modifier = Modifier.size(28.dp))
                 Spacer(Modifier.size(18.dp))
-                Column { Text(title, fontWeight = FontWeight.SemiBold); Text(subtitle, color = Color(0xFFAAAAAA), fontSize = 12.sp) }
+                Column {
+                    Text(title, fontWeight = FontWeight.SemiBold)
+                    Text(subtitle, color = Color(0xFFAAAAAA), fontSize = 12.sp)
+                }
             }
         }
         item { Text("Videolar", fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 18.dp, bottom = 8.dp)) }
