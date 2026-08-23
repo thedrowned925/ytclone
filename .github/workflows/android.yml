@@ -80,31 +80,27 @@ jobs:
 
       - name: Prepare release APK
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk YTClone-0.1.2-debug.apk
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk YTClone-0.1.3-debug.apk
 
-      - name: Publish GitHub Release v0.1.2
+      - name: Publish GitHub Release v0.1.3
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view v0.1.2 >/dev/null 2>&1; then
-            gh release upload v0.1.2 YTClone-0.1.2-debug.apk --clobber
+          if gh release view v0.1.3 >/dev/null 2>&1; then
+            gh release upload v0.1.3 YTClone-0.1.3-debug.apk --clobber
           else
-            gh release create v0.1.2 YTClone-0.1.2-debug.apk \
-              --title "YTClone v0.1.2 - 4K Archive Test" \
-              --notes "Android arşivleyici artık YouTube'daki mevcut çözünürlük/FPS kombinasyonlarını 2160p/4K'ya kadar native olarak indirir; sesler, altyazılar, thumbnail ve kanal snapshot'ı aynı video Release'ine gider. Tek video = tek Release, 1.8 GiB chunk, 3 paralel upload, upload doğrulama, catalog.json/channels.json, detaylı foreground bildirim ilerlemesi ve doğrulama sonrası yerel medya temizliği eklendi. v0.1.1 ile aynı Android imzasını kullanır; normal güncelleme olarak kurulabilir."
+            gh release create v0.1.3 YTClone-0.1.3-debug.apk \
+              --title "YTClone v0.1.3 - yt-dlp & Downloads Fix" \
+              --notes "yt-dlp artık uygulama açılışında ve her arşiv işinden önce official NIGHTLY kanalından kendini günceller; extractor hatasında güncelleme + tek retry yapılır. Büyük medya app data yerine Download/YTClone/Working altında tutulur ve GitHub Release + katalog doğrulandıktan sonra tamamen silinir. Repo otomatik thedrowned925/ytclone; kullanıcı yalnız token girer. Her çözünürlük için yalnız mevcut en yüksek FPS sürümü saklanır: 1080p60 varsa 1080p60, yoksa normal 1080p. 4K/2160p üstü alınmaz."
           fi
 
       - name: Record successful release publication
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          printf '# Android Release Status\n\n- Release: v0.1.2\n- Asset: YTClone-0.1.2-debug.apk\n- Status: published successfully\n- Source commit: %s\n' "$GITHUB_SHA" > RELEASE-STATUS.md
-          if [ ! -f "SIGNING-V1-INITIALIZED" ]; then
-            KEY_FINGERPRINT=$(keytool -list -v -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey | sed -n 's/.*SHA256: //p' | head -n 1)
-            printf 'YTClone Android stable signing initialized\nSHA256: %s\n' "$KEY_FINGERPRINT" > SIGNING-V1-INITIALIZED
-          fi
+          printf '# Android Release Status\n\n- Release: v0.1.3\n- Asset: YTClone-0.1.3-debug.apk\n- Status: published successfully\n- Source commit: %s\n' "$GITHUB_SHA" > RELEASE-STATUS.md
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add RELEASE-STATUS.md SIGNING-V1-INITIALIZED
-          git diff --cached --quiet || git commit -m "chore: record v0.1.2 release publication [skip ci]"
+          git add RELEASE-STATUS.md
+          git diff --cached --quiet || git commit -m "chore: record v0.1.3 release publication [skip ci]"
           git push
