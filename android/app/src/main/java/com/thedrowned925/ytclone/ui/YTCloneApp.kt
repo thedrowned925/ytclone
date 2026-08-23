@@ -176,7 +176,7 @@ fun YTCloneApp(
                         onUrlChange = { importUrl = it },
                         activeWorkId = activeWorkId,
                         onArchive = { url, options -> activeWorkId = onArchive(url, options) },
-                        storageReady = mediaRepo.contains('/') && tokenConfigured,
+                        storageReady = tokenConfigured,
                     )
                     Tab.Channels -> SimplePage("Kanallar", "İçe aktarılan videolar kaynak kanalına göre otomatik gruplanacak.")
                     Tab.Library -> LibraryScreen(catalog, onOpen = { selectedVideo = it })
@@ -228,7 +228,7 @@ private fun HomeScreen(
                     Text("Kişisel YouTube arşivin", fontSize = 22.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "YouTube'dan paylaş veya bağlantı yapıştır. 4K'ya kadar tüm kalite/FPS sürümleri, sesler ve altyazılar Android'de arşivlenecek.",
+                        "YouTube'dan paylaş veya bağlantı yapıştır. 4K'ya kadar her çözünürlüğün mevcut en yüksek FPS sürümü, sesler ve altyazılar arşivlenecek.",
                         color = Color(0xFFAAAAAA),
                     )
                     Spacer(Modifier.height(22.dp))
@@ -269,7 +269,7 @@ private fun VideoCard(video: LocalCatalogRepository.Video, onOpen: (LocalCatalog
             Column(modifier = Modifier.weight(1f).padding(start = 10.dp)) {
                 Text(video.title, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Text(
-                    "${video.channel} · ${video.qualities.size} kalite/FPS · ${video.audioTracks.size} ses · ${video.status}",
+                    "${video.channel} · ${video.qualities.size} kalite · ${video.audioTracks.size} ses · ${video.status}",
                     color = Color(0xFFAAAAAA),
                     fontSize = 12.sp,
                     maxLines = 1,
@@ -300,7 +300,7 @@ private fun ImportScreen(
             )
             if (!storageReady) {
                 Text(
-                    "GitHub depolama ayarlı değil. Sağ üstteki H profilinden repo ve token'ı kaydet.",
+                    "GitHub token ayarlı değil. Sağ üstteki H profilinden token'ı bir kez kaydet.",
                     color = Color(0xFFFFB74D),
                     modifier = Modifier.padding(bottom = 12.dp),
                 )
@@ -315,8 +315,8 @@ private fun ImportScreen(
             )
             Spacer(Modifier.height(18.dp))
             ArchivePolicyRow(
-                "4K'ya kadar tüm kalite ve FPS sürümleri",
-                "Kaynakta bulunan 2160p/1440p/1080p/720p… ve 30/50/60 FPS varyantları native olarak alınır; 4K üstü alınmaz.",
+                "4K'ya kadar tüm kaliteler",
+                "Her çözünürlükten tek sürüm alınır: 1080p60 varsa 1080p60, yoksa normal 1080p. 30 FPS ve 60 FPS ayrı kopyalar olarak tutulmaz.",
             )
             ArchivePolicyRow(
                 "Tüm ses parçalarını al",
@@ -328,7 +328,7 @@ private fun ImportScreen(
             )
             ArchivePolicyRow(
                 "Tek video = tek GitHub Release",
-                "1.8 GiB chunk, kanal metadata/avatar/banner, katalog güncelleme ve doğrulama sonrası otomatik telefon temizliği.",
+                "1.8 GiB chunk, kanal metadata/avatar/banner ve katalog aynı sistemde tutulur. GitHub doğrulamasından sonra Download/YTClone çalışma klasörü silinir.",
             )
             Spacer(Modifier.height(18.dp))
             Button(
