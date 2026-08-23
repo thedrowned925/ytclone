@@ -53,13 +53,36 @@ class GitHubReleaseUploader(
             ?: sha256(mediaManifest.optString("webpageUrl") + mediaManifest.optString("title")).take(16)
         val baseTag = "ytclone-${sanitizeTag(videoId)}"
 
-        val files = planFiles(jobDir, excludedLogicalNames)
-        val allParts = files.flatMap { it.parts }
-        require(allParts.isNotEmpty()) { "Yüklenecek dosya yok" }
-
-        val releaseCount = ceil(allParts.size / MAX_DATA_ASSETS_PER_RELEASE.toDouble()).toInt().coerceAtLeast(1)
+        // Determine the release count first. manifest.json is tiny and remains one
+        // asset; adding the storage metadata below therefore does not change the
+        // number of planned media parts in normal operation.
+        val initialFiles = planFiles(jobDir, excludedLogicalNames)
+        val initialParts = initialFiles.sumOf { it.parts.size }
+        require(initialParts > 0) { "Yüklenecek dosya yok" }
+        val releaseCount = ceil(initialParts / MAX_DATA_ASSETS_PER_RELEASE.toDouble()).toInt().coerceAtLeast(1)
         val releaseTags = (0 until releaseCount).map { index ->
             "$baseTag-r${(index + 1).toString().padStart(3, '0')}"
+        }
+
+        // Releases are still drafts at this point, so it is safe to place the
+        // final public catalog metadata in manifest.json before uploading it.
+        // If any later upload fails the Releases stay draft and consumers never
+        // observe a half-published manifest.
+        mediaManifest.put("status", "published")
+        mediaManifest.put(
+            "storage",
+            JSONObject()
+                .put("provider", "github-release")
+                .put("primaryReleaseTag", releaseTags.first())
+                .put("releaseTags", JSONArray(releaseTags)),
+        )
+        File(jobDir, MEDIA_MANIFEST).writeText(mediaManifest.toString(2))
+
+        val files = planFiles(jobDir, excludedLogicalNames)
+        val allParts = files.flatMap { it.parts }
+        val finalReleaseCount = ceil(allParts.size / MAX_DATA_ASSETS_PER_RELEASE.toDouble()).toInt().coerceAtLeast(1)
+        check(finalReleaseCount == releaseCount) {
+            "Manifest güncellemesi Release planını değiştirdi; yayın güvenli biçimde durduruldu"
         }
 
         allParts.forEachIndexed { index, part ->
@@ -366,6 +389,7 @@ class GitHubReleaseUploader(
         const val CHUNK_SIZE_BYTES: Long = 1_932_735_283L // floor(1.8 GiB)
         private const val GITHUB_ASSET_LIMIT_BYTES: Long = 2L * 1024L * 1024L * 1024L
         private const val MAX_DATA_ASSETS_PER_RELEASE = 990
+        private const val MEDIA_MANIFEST = "manifest.json"
         private const val STORAGE_MANIFEST = "storage-manifest.json"
         private val JSON = "application/json; charset=utf-8".toMediaType()
         private val OCTET_STREAM = "application/octet-stream".toMediaType()
