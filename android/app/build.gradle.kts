@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.thedrowned925.ytclone"
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.thedrowned925.ytclone"
