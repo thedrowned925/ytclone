@@ -125,7 +125,12 @@ fun PlayerScreen(
                 FilterChip(
                     selected = quality?.id == item.id,
                     onClick = { quality = item },
-                    label = { Text(if (item.id == "source") "Orijinal" else item.id) },
+                    label = {
+                        Text(
+                            if (item.id == "source") "Orijinal · ${item.fps} FPS"
+                            else "${item.height}p · ${item.fps} FPS",
+                        )
+                    },
                     modifier = Modifier.padding(end = 8.dp),
                 )
             }
