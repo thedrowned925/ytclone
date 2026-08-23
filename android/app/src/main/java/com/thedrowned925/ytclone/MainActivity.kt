@@ -59,8 +59,8 @@ class MainActivity : ComponentActivity() {
                     tokenConfigured.value = !settingsStore.gitHubToken().isNullOrBlank()
                 },
                 isPipMode = pipMode.value,
-                onPlaybackActiveChanged = { active ->
-                    pipEligible = active
+                onPlaybackActiveChanged = { eligible ->
+                    pipEligible = eligible
                     updatePictureInPictureParams()
                 },
             )
@@ -75,8 +75,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        // Android 12+ uses setAutoEnterEnabled for the smooth system gesture.
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S && pipEligible && !isInPictureInPictureMode) {
+        // Keep auto-enter for Android 12+, but also call enterPictureInPictureMode
+        // explicitly as a Samsung/OEM fallback. runCatching makes the double path safe.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && pipEligible && !isInPictureInPictureMode) {
             runCatching { enterPictureInPictureMode(buildPipParams(autoEnter = false)) }
         }
     }
@@ -88,7 +89,7 @@ class MainActivity : ComponentActivity() {
 
     private fun updatePictureInPictureParams() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            setPictureInPictureParams(buildPipParams(autoEnter = pipEligible))
+            runCatching { setPictureInPictureParams(buildPipParams(autoEnter = pipEligible)) }
         }
     }
 

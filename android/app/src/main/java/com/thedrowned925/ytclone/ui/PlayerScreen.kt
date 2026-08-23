@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import android.net.Uri
+import android.os.Environment
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -25,13 +26,17 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ClosedCaption
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.Replay10
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -39,6 +44,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -74,6 +80,8 @@ import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
 import com.thedrowned925.ytclone.catalog.LocalCatalogRepository
+import com.thedrowned925.ytclone.library.OfflineDownloadQueue
+import com.thedrowned925.ytclone.library.PlaylistStore
 import com.thedrowned925.ytclone.media.CloudMediaSourceFactory
 import com.thedrowned925.ytclone.media.PlaybackManager
 import com.thedrowned925.ytclone.storage.GitHubReleaseReader
@@ -96,59 +104,75 @@ fun PlayerScreen(
 ) {
     val context = LocalContext.current
     val player = remember { PlaybackManager.player(context) }
+    val playlistStore = remember { PlaylistStore(context) }
     var quality by remember(video.id) { mutableStateOf(video.qualities.firstOrNull()) }
     var audio by remember(video.id) { mutableStateOf(video.audioTracks.firstOrNull { it.isDefault } ?: video.audioTracks.firstOrNull()) }
     var subtitle by remember(video.id) { mutableStateOf<LocalCatalogRepository.Subtitle?>(null) }
     var sourceError by remember(video.id) { mutableStateOf<String?>(null) }
-    var controlsVisible by remember { mutableStateOf(true) }
+    var controlsVisible by remember(video.id) { mutableStateOf(true) }
     var isPlaying by remember { mutableStateOf(player.isPlaying) }
-    var position by remember { mutableLongStateOf(player.currentPosition.coerceAtLeast(0L)) }
-    var duration by remember { mutableLongStateOf(player.duration.takeIf { it > 0 } ?: 0L) }
-    var speed by remember { mutableStateOf(player.playbackParameters.speed) }
+    var position by remember(video.id) { mutableLongStateOf(PlaybackManager.position(video.id)) }
+    var duration by remember(video.id) { mutableLongStateOf(player.duration.takeIf { it > 0 } ?: 0L) }
+    var speed by remember(video.id) { mutableStateOf(player.playbackParameters.speed) }
     var menu by remember { mutableStateOf<PlayerMenu?>(null) }
     var fullscreen by remember { mutableStateOf(false) }
     var descriptionExpanded by remember { mutableStateOf(false) }
+    var isScrubbing by remember { mutableStateOf(false) }
+    var scrubPosition by remember { mutableLongStateOf(position) }
+    var playlistPicker by remember { mutableStateOf(false) }
+    var newPlaylistName by remember { mutableStateOf("") }
+    var feedback by remember { mutableStateOf<String?>(null) }
+
+    // PiP eligibility is tied to being on a video screen, not to play/pause state.
+    DisposableEffect(video.id) {
+        onPlaybackActiveChanged(true)
+        onDispose { onPlaybackActiveChanged(false) }
+    }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
-            override fun onIsPlayingChanged(value: Boolean) {
-                isPlaying = value
-                onPlaybackActiveChanged(value)
-            }
+            override fun onIsPlayingChanged(value: Boolean) { isPlaying = value }
             override fun onPlaybackStateChanged(playbackState: Int) {
                 duration = player.duration.takeIf { it > 0 } ?: duration
             }
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                sourceError = error.errorCodeName + ": " + (error.message ?: "Oynatma hatası")
+            }
         }
         player.addListener(listener)
-        onPlaybackActiveChanged(player.isPlaying)
-        onDispose {
-            player.removeListener(listener)
-            onPlaybackActiveChanged(false)
-        }
+        onDispose { player.removeListener(listener) }
     }
 
     LaunchedEffect(player, video.id) {
         while (true) {
-            position = player.currentPosition.coerceAtLeast(0L)
-            duration = player.duration.takeIf { it > 0 } ?: duration
-            delay(400)
+            if (PlaybackManager.isActive(video.id)) {
+                val now = player.currentPosition.coerceAtLeast(0L)
+                if (!isScrubbing) position = now
+                PlaybackManager.rememberPosition(video.id, now)
+                duration = player.duration.takeIf { it > 0 } ?: duration
+            }
+            delay(300)
+        }
+    }
+
+    LaunchedEffect(controlsVisible, isPlaying) {
+        if (controlsVisible && isPlaying) {
+            delay(3_500)
+            controlsVisible = false
         }
     }
 
     LaunchedEffect(quality, audio, subtitle, video.primaryReleaseTag) {
         val selectedQuality = quality ?: return@LaunchedEffect
-        val previousPosition = if (player.currentMediaItem?.mediaId == video.id) player.currentPosition.coerceAtLeast(0L) else 0L
-        val shouldPlay = player.playWhenReady || player.mediaItemCount == 0
-        PlaybackManager.ensureService(context)
-        runCatching {
-            createMediaSource(context, video, selectedQuality, audio, subtitle)
-        }.onSuccess { mediaSource ->
-            sourceError = null
-            player.setMediaSource(mediaSource)
-            player.prepare()
-            if (previousPosition > 0L) player.seekTo(previousPosition)
-            player.playWhenReady = shouldPlay
-        }.onFailure { sourceError = it.message ?: it.javaClass.simpleName }
+        val shouldPlay = if (PlaybackManager.isActive(video.id)) player.playWhenReady else true
+        runCatching { createMediaSource(context, video, selectedQuality, audio, subtitle) }
+            .onSuccess { mediaSource ->
+                sourceError = null
+                val restored = PlaybackManager.switchSource(context, video.id, mediaSource, shouldPlay)
+                position = restored
+                scrubPosition = restored
+            }
+            .onFailure { sourceError = it.message ?: it.javaClass.simpleName }
     }
 
     LaunchedEffect(speed) { player.setPlaybackSpeed(speed) }
@@ -156,6 +180,13 @@ fun PlayerScreen(
     DisposableEffect(fullscreen) {
         setFullscreen(context, fullscreen)
         onDispose { if (fullscreen) setFullscreen(context, false) }
+    }
+
+    fun seekTo(target: Long) {
+        val bounded = if (duration > 0) target.coerceIn(0L, duration) else target.coerceAtLeast(0L)
+        PlaybackManager.seek(video.id, bounded)
+        position = bounded
+        scrubPosition = bounded
     }
 
     if (isPipMode) {
@@ -170,8 +201,12 @@ fun PlayerScreen(
             position = position,
             duration = duration,
             isPlaying = isPlaying,
+            isScrubbing = false,
+            scrubPosition = position,
+            onScrubChange = {},
+            onScrubFinished = {},
             onPlayPause = { if (player.isPlaying) player.pause() else player.play() },
-            onSeek = { player.seekTo(it) },
+            onSeekRelative = { delta -> seekTo(player.currentPosition + delta) },
             modifier = Modifier.fillMaxSize(),
         )
         return
@@ -185,15 +220,23 @@ fun PlayerScreen(
             onToggleControls = { controlsVisible = !controlsVisible },
             onBack = { if (fullscreen) fullscreen = false else onBack() },
             onSettings = { menu = PlayerMenu.ROOT },
-            onCaptions = {
-                subtitle = if (subtitle == null) video.subtitles.firstOrNull() else null
-            },
+            onCaptions = { subtitle = if (subtitle == null) video.subtitles.firstOrNull() else null },
             onFullscreen = { fullscreen = !fullscreen },
             position = position,
             duration = duration,
             isPlaying = isPlaying,
+            isScrubbing = isScrubbing,
+            scrubPosition = scrubPosition,
+            onScrubChange = {
+                isScrubbing = true
+                scrubPosition = it
+            },
+            onScrubFinished = {
+                seekTo(scrubPosition)
+                isScrubbing = false
+            },
             onPlayPause = { if (player.isPlaying) player.pause() else player.play() },
-            onSeek = { player.seekTo(it) },
+            onSeekRelative = { delta -> seekTo(player.currentPosition + delta) },
             modifier = playerModifier,
         )
 
@@ -202,32 +245,61 @@ fun PlayerScreen(
                 modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 14.dp),
             ) {
                 sourceError?.let {
-                    Text("Oynatma hatası: $it", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(vertical = 8.dp))
+                    Text("Oynatma hatası: $it", color = Color(0xFFFF6B6B), modifier = Modifier.padding(vertical = 8.dp))
                 }
-                Text(video.title, fontWeight = FontWeight.Bold, fontSize = 20.sp, modifier = Modifier.padding(top = 14.dp))
+                Text(video.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp, modifier = Modifier.padding(top = 14.dp))
                 if (video.uploadDate.isNotBlank()) {
-                    Text(video.uploadDate, color = Color(0xFFAAAAAA), fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+                    Text(formatUploadDate(video.uploadDate), color = Color(0xFFAAAAAA), fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
                 }
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp).clickable(onClick = onChannelClick),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 14.dp).clickable(onClick = onChannelClick),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    CircularFileImage(channel?.avatarFile, video.channel.take(1), 42)
+                    CircularFileImage(channel?.avatarFile, video.channel.take(1), 44)
                     Column(modifier = Modifier.padding(start = 11.dp).weight(1f)) {
-                        Text(channel?.name ?: video.channel, fontWeight = FontWeight.SemiBold)
+                        Text(channel?.name ?: video.channel, color = Color.White, fontWeight = FontWeight.SemiBold)
                         val handle = channel?.handle.orEmpty()
                         if (handle.isNotBlank()) Text(handle, color = Color(0xFFAAAAAA), fontSize = 12.sp)
                     }
                 }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    PlayerActionButton(Icons.Default.Download, "İndir") {
+                        val q = quality
+                        val tag = video.primaryReleaseTag
+                        if (q == null || tag.isNullOrBlank()) {
+                            feedback = "Bu video için indirilebilir Release bulunamadı"
+                        } else {
+                            OfflineDownloadQueue.enqueue(
+                                context = context,
+                                videoId = video.id,
+                                title = video.title,
+                                releaseTag = tag,
+                                qualityLogicalName = q.logicalName,
+                                audioLogicalName = audio?.logicalName,
+                                subtitleLogicalName = subtitle?.logicalName,
+                            )
+                            feedback = "İndirme başlatıldı • ${qualityLabel(q)}"
+                        }
+                    }
+                    PlayerActionButton(Icons.Default.PlaylistAdd, "Kaydet") { playlistPicker = true }
+                }
+                feedback?.let { Text(it, color = Color(0xFF81C784), fontSize = 12.sp, modifier = Modifier.padding(bottom = 10.dp)) }
+
                 HorizontalDivider(color = Color(0xFF272727))
                 if (video.description.isNotBlank()) {
                     Column(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp).background(Color(0xFF272727), MaterialTheme.shapes.medium)
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp)
+                            .background(Color(0xFF272727), MaterialTheme.shapes.medium)
                             .clickable { descriptionExpanded = !descriptionExpanded }.padding(12.dp),
                     ) {
-                        Text("Açıklama", fontWeight = FontWeight.Bold)
+                        Text("Açıklama", color = Color.White, fontWeight = FontWeight.Bold)
                         Text(
                             video.description,
+                            color = Color.White,
                             maxLines = if (descriptionExpanded) Int.MAX_VALUE else 3,
                             overflow = TextOverflow.Ellipsis,
                             fontSize = 13.sp,
@@ -251,11 +323,11 @@ fun PlayerScreen(
     }
 
     menu?.let { active ->
-        ModalBottomSheet(onDismissRequest = { menu = null }, containerColor = Color(0xFF212121)) {
+        ModalBottomSheet(onDismissRequest = { menu = null }, containerColor = Color(0xFF212121), contentColor = Color.White) {
             when (active) {
                 PlayerMenu.ROOT -> {
                     SheetRow("Kalite", quality?.let(::qualityLabel) ?: "Otomatik") { menu = PlayerMenu.QUALITY }
-                    SheetRow("Oynatma hızı", "${speed}x") { menu = PlayerMenu.SPEED }
+                    SheetRow("Oynatma hızı", speedLabel(speed)) { menu = PlayerMenu.SPEED }
                     SheetRow("Ses parçası", audio?.let(::audioLabel) ?: "Orijinal") { menu = PlayerMenu.AUDIO }
                     SheetRow("Altyazılar", subtitle?.label ?: "Kapalı") { menu = PlayerMenu.SUBTITLES }
                 }
@@ -272,10 +344,48 @@ fun PlayerScreen(
                     }
                 }
                 PlayerMenu.SPEED -> listOf(0.25f, 0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f).forEach { value ->
-                    ChoiceRow(if (value == 1f) "Normal" else "${value}x", speed == value) { speed = value; menu = null }
+                    ChoiceRow(speedLabel(value), speed == value) { speed = value; menu = null }
                 }
             }
             Spacer(Modifier.height(24.dp))
+        }
+    }
+
+    if (playlistPicker) {
+        ModalBottomSheet(onDismissRequest = { playlistPicker = false }, containerColor = Color(0xFF212121), contentColor = Color.White) {
+            Text("Listeye kaydet", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp))
+            playlistStore.list().forEach { playlist ->
+                ListItem(
+                    headlineContent = { Text(playlist.name, color = Color.White) },
+                    supportingContent = { Text("${playlist.videoIds.size} video", color = Color(0xFFAAAAAA)) },
+                    trailingContent = { if (video.id in playlist.videoIds) Icon(Icons.Default.Check, null, tint = Color(0xFF81C784)) },
+                    modifier = Modifier.clickable {
+                        playlistStore.addVideo(playlist.id, video.id)
+                        feedback = "${playlist.name} listesine kaydedildi"
+                        playlistPicker = false
+                    },
+                    colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
+                )
+            }
+            OutlinedTextField(
+                value = newPlaylistName,
+                onValueChange = { newPlaylistName = it },
+                label = { Text("Yeni liste adı") },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+                singleLine = true,
+            )
+            Button(
+                onClick = {
+                    val created = playlistStore.create(newPlaylistName)
+                    playlistStore.addVideo(created.id, video.id)
+                    newPlaylistName = ""
+                    feedback = "${created.name} oluşturuldu ve video kaydedildi"
+                    playlistPicker = false
+                },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp),
+                enabled = newPlaylistName.isNotBlank(),
+            ) { Text("Liste oluştur") }
+            Spacer(Modifier.height(22.dp))
         }
     }
 }
@@ -292,17 +402,19 @@ private fun PlayerSurface(
     position: Long,
     duration: Long,
     isPlaying: Boolean,
+    isScrubbing: Boolean,
+    scrubPosition: Long,
+    onScrubChange: (Long) -> Unit,
+    onScrubFinished: () -> Unit,
     onPlayPause: () -> Unit,
-    onSeek: (Long) -> Unit,
+    onSeekRelative: (Long) -> Unit,
     modifier: Modifier,
 ) {
     Box(
         modifier = modifier.background(Color.Black).pointerInput(Unit) {
             detectTapGestures(
                 onTap = { onToggleControls() },
-                onDoubleTap = { offset ->
-                    if (offset.x < size.width / 2f) player.seekBack() else player.seekForward()
-                },
+                onDoubleTap = { offset -> onSeekRelative(if (offset.x < size.width / 2f) -10_000L else 10_000L) },
             )
         },
     ) {
@@ -312,7 +424,7 @@ private fun PlayerSurface(
             modifier = Modifier.fillMaxSize(),
         )
         if (controlsVisible) {
-            Box(Modifier.fillMaxSize().background(Color(0x55000000))) {
+            Box(Modifier.fillMaxSize().background(Color(0x66000000))) {
                 Row(
                     modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter).padding(4.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -327,24 +439,25 @@ private fun PlayerSurface(
                     horizontalArrangement = Arrangement.spacedBy(28.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    IconButton(onClick = { player.seekBack() }, modifier = Modifier.size(54.dp)) {
+                    IconButton(onClick = { onSeekRelative(-10_000L) }, modifier = Modifier.size(54.dp)) {
                         Icon(Icons.Default.Replay10, "10 saniye geri", tint = Color.White, modifier = Modifier.size(38.dp))
                     }
-                    IconButton(onClick = onPlayPause, modifier = Modifier.size(68.dp).background(Color(0xDDFFFFFF), CircleShape)) {
-                        Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, if (isPlaying) "Duraklat" else "Oynat", tint = Color.Black, modifier = Modifier.size(42.dp))
+                    IconButton(onClick = onPlayPause, modifier = Modifier.size(68.dp).background(Color(0xE6FFFFFF), CircleShape)) {
+                        Icon(if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, null, tint = Color.Black, modifier = Modifier.size(42.dp))
                     }
-                    IconButton(onClick = { player.seekForward() }, modifier = Modifier.size(54.dp)) {
+                    IconButton(onClick = { onSeekRelative(10_000L) }, modifier = Modifier.size(54.dp)) {
                         Icon(Icons.Default.Forward10, "10 saniye ileri", tint = Color.White, modifier = Modifier.size(38.dp))
                     }
                 }
                 Column(modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
                     Slider(
-                        value = position.coerceAtMost(duration.coerceAtLeast(1L)).toFloat(),
-                        onValueChange = { onSeek(it.toLong()) },
+                        value = (if (isScrubbing) scrubPosition else position).coerceAtMost(duration.coerceAtLeast(1L)).toFloat(),
+                        onValueChange = { onScrubChange(it.toLong()) },
+                        onValueChangeFinished = onScrubFinished,
                         valueRange = 0f..duration.coerceAtLeast(1L).toFloat(),
                     )
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("${formatMs(position)} / ${formatMs(duration)}", color = Color.White, fontSize = 12.sp)
+                        Text("${formatMs(if (isScrubbing) scrubPosition else position)} / ${formatMs(duration)}", color = Color.White, fontSize = 12.sp)
                         Spacer(Modifier.weight(1f))
                         IconButton(onClick = onFullscreen) { Icon(Icons.Default.Fullscreen, "Tam ekran", tint = Color.White) }
                     }
@@ -355,20 +468,32 @@ private fun PlayerSurface(
 }
 
 @Composable
+private fun PlayerActionButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 4.dp)) {
+        Box(Modifier.size(38.dp).background(Color(0xFF272727), CircleShape), contentAlignment = Alignment.Center) {
+            Icon(icon, label, tint = Color.White, modifier = Modifier.size(22.dp))
+        }
+        Text(label, color = Color.White, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+    }
+}
+
+@Composable
 private fun SheetRow(title: String, value: String, onClick: () -> Unit) {
     ListItem(
-        headlineContent = { Text(title) },
+        headlineContent = { Text(title, color = Color.White) },
         supportingContent = { Text(value, color = Color(0xFFAAAAAA)) },
         modifier = Modifier.clickable(onClick = onClick),
+        colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
     )
 }
 
 @Composable
 private fun ChoiceRow(title: String, selected: Boolean, onClick: () -> Unit) {
     ListItem(
-        headlineContent = { Text(title) },
+        headlineContent = { Text(title, color = Color.White) },
         leadingContent = { RadioButton(selected = selected, onClick = onClick) },
         modifier = Modifier.clickable(onClick = onClick),
+        colors = androidx.compose.material3.ListItemDefaults.colors(containerColor = Color.Transparent),
     )
 }
 
@@ -395,17 +520,20 @@ private fun createMediaSource(
 ): MediaSource {
     val artwork = video.thumbnailFile?.let { Uri.fromFile(it) }
     val metadata = MediaMetadata.Builder().setTitle(video.title).setArtist(video.channel).apply { artwork?.let(::setArtworkUri) }.build()
-    val localVideo = quality.localFile
-    val localAudio = audio?.localFile
+    val offlineRoot = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "YTClone/Offline/${video.id}")
+    val localVideo = quality.localFile ?: File(offlineRoot, quality.logicalName).takeIf { it.exists() && it.length() > 0L }
+    val localAudio = audio?.let { track -> track.localFile ?: File(offlineRoot, track.logicalName).takeIf { it.exists() && it.length() > 0L } }
+    val localSubtitle = subtitle?.let { track -> track.localFile ?: File(offlineRoot, track.logicalName).takeIf { it.exists() && it.length() > 0L } }
+
     if (localVideo != null && (audio == null || localAudio != null)) {
         val dataSource = DefaultDataSource.Factory(context)
-        val subtitleConfigs = subtitle?.localFile?.let { file ->
+        val subtitleConfigs = localSubtitle?.let { file ->
             listOf(
                 MediaItem.SubtitleConfiguration.Builder(Uri.fromFile(file))
-                    .setId(subtitle.id)
-                    .setLanguage(subtitle.language.takeUnless { it == "und" })
-                    .setLabel(subtitle.label)
-                    .setMimeType(subtitleMime(subtitle.logicalName))
+                    .setId(subtitle?.id ?: file.name)
+                    .setLanguage(subtitle?.language?.takeUnless { it == "und" })
+                    .setLabel(subtitle?.label)
+                    .setMimeType(subtitleMime(file.name))
                     .build(),
             )
         } ?: emptyList()
@@ -435,14 +563,11 @@ private fun createMediaSource(
         artworkUri = artwork,
         videoLogicalName = quality.logicalName,
         audioLogicalName = audio?.logicalName,
-        subtitles = subtitle?.let {
-            listOf(CloudMediaSourceFactory.SubtitleTrack(it.logicalName, it.language, it.label))
-        } ?: emptyList(),
+        subtitles = subtitle?.let { listOf(CloudMediaSourceFactory.SubtitleTrack(it.logicalName, it.language, it.label)) } ?: emptyList(),
     )
 }
 
-private fun qualityLabel(item: LocalCatalogRepository.Quality): String =
-    if (item.fps > 30) "${item.height}p${item.fps}" else "${item.height}p"
+private fun qualityLabel(item: LocalCatalogRepository.Quality): String = if (item.fps > 30) "${item.height}p${item.fps}" else "${item.height}p"
 
 private fun audioLabel(item: LocalCatalogRepository.Audio): String {
     val language = when (item.language.lowercase()) {
@@ -467,8 +592,14 @@ private fun subtitleMime(name: String): String = when (name.substringAfterLast('
     else -> MimeTypes.TEXT_VTT
 }
 
+private fun speedLabel(value: Float): String = if (value == 1f) "Normal" else "${value}x"
+
+private fun formatUploadDate(value: String): String = if (value.length == 8 && value.all(Char::isDigit)) {
+    "${value.substring(6, 8)}.${value.substring(4, 6)}.${value.substring(0, 4)}"
+} else value
+
 private fun formatMs(value: Long): String {
-    val total = (value.coerceAtLeast(0L) / 1000L)
+    val total = value.coerceAtLeast(0L) / 1000L
     val hours = total / 3600
     val minutes = (total % 3600) / 60
     val seconds = total % 60
