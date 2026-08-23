@@ -11,10 +11,14 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.ContextCompat
 import com.thedrowned925.ytclone.ingest.IngestQueue
+import com.thedrowned925.ytclone.storage.SettingsStore
 import com.thedrowned925.ytclone.ui.YTCloneApp
 
 class MainActivity : ComponentActivity() {
     private val sharedUrl = mutableStateOf<String?>(null)
+    private val mediaRepo = mutableStateOf("")
+    private val tokenConfigured = mutableStateOf(false)
+    private lateinit var settingsStore: SettingsStore
 
     private val notificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -22,6 +26,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        settingsStore = SettingsStore(this)
+        mediaRepo.value = settingsStore.mediaRepo()
+        tokenConfigured.value = !settingsStore.gitHubToken().isNullOrBlank()
         sharedUrl.value = extractSharedUrl(intent)
         requestNotificationPermissionIfNeeded()
 
@@ -29,7 +36,15 @@ class MainActivity : ComponentActivity() {
             YTCloneApp(
                 incomingUrl = sharedUrl.value,
                 onIncomingUrlConsumed = { sharedUrl.value = null },
-                onArchive = { url -> IngestQueue.enqueue(this, url) },
+                onArchive = { url, options -> IngestQueue.enqueue(this, url, options) },
+                mediaRepo = mediaRepo.value,
+                tokenConfigured = tokenConfigured.value,
+                onSaveStorageSettings = { repo, newToken ->
+                    settingsStore.saveMediaRepo(repo)
+                    if (!newToken.isNullOrBlank()) settingsStore.saveGitHubToken(newToken)
+                    mediaRepo.value = settingsStore.mediaRepo()
+                    tokenConfigured.value = !settingsStore.gitHubToken().isNullOrBlank()
+                },
             )
         }
     }
