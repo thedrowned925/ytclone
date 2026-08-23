@@ -62,8 +62,5 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.11.2")
     implementation("com.squareup.okhttp3:okhttp-android:5.1.0")
 
-    // Android-native yt-dlp. The compat artifact exposes the familiar
-    // YoutubeDL/YoutubeDLRequest aliases in dev.ffmpegkit_maintained.ytdlp.compat.
     implementation("dev.ffmpegkit-maintained:yt-dlp-android:2.0.2")
-    implementation("dev.ffmpegkit-maintained:yt-dlp-android-compat:2.0.2")
 }
