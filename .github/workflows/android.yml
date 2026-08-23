@@ -62,25 +62,25 @@ jobs:
           if-no-files-found: error
       - name: Prepare release APK
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk YTClone-0.1.9-debug.apk
-      - name: Publish GitHub Release v0.1.9
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk YTClone-0.2.0-debug.apk
+      - name: Publish GitHub Release v0.2.0
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view v0.1.9 >/dev/null 2>&1; then
-            gh release upload v0.1.9 YTClone-0.1.9-debug.apk --clobber
+          if gh release view v0.2.0 >/dev/null 2>&1; then
+            gh release upload v0.2.0 YTClone-0.2.0-debug.apk --clobber
           else
-            gh release create v0.1.9 YTClone-0.1.9-debug.apk \
-              --title "YTClone v0.1.9 - Stable Quality Switching" \
-              --notes "Normal playback continues to stream directly from GitHub Release assets with byte-range requests; videos are only written to Download/YTClone/Offline when the user explicitly presses Download. Quality/audio/subtitle source switches now freeze the active millisecond before replacing the MediaSource. Transient 0ms values during prepare/buffering cannot overwrite that target; rapid consecutive quality changes reuse the same frozen position and READY retries the pending seek before clearing transition state. This fixes quality changes restarting at 0 and reduces source-switch player lockups. Uses the same stable Android signing key as previous releases."
+            gh release create v0.2.0 YTClone-0.2.0-debug.apk \
+              --title "YTClone v0.2.0 - Seekable GitHub Streaming" \
+              --notes "Fixes the root cause of seek/playbar and quality/audio/subtitle switches restarting at 0. Newly archived YouTube adaptive streams are losslessly remuxed with the bundled FFmpeg into seek-friendly Matroska containers (video .mkv, audio .mka). There is no video/audio re-encoding and no quality loss; FFmpeg only rebuilds the container index/cues. Normal playback still streams from GitHub Release assets through byte-range requests and does not download the whole video to the device. Archive media schema is now v2, so re-submitting an older archived YouTube URL performs a one-time repair and updates the same ytclone-<videoId> Release instead of creating a duplicate. Uses the same stable Android signing key as previous releases."
           fi
       - name: Record successful release publication
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          printf '# Android Release Status\n\n- Release: v0.1.9\n- Asset: YTClone-0.1.9-debug.apk\n- Status: published successfully\n- Source commit: %s\n' "$GITHUB_SHA" > RELEASE-STATUS.md
+          printf '# Android Release Status\n\n- Release: v0.2.0\n- Asset: YTClone-0.2.0-debug.apk\n- Status: published successfully\n- Source commit: %s\n' "$GITHUB_SHA" > RELEASE-STATUS.md
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add RELEASE-STATUS.md
-          git diff --cached --quiet || git commit -m "chore: record v0.1.9 release publication [skip ci]"
+          git diff --cached --quiet || git commit -m "chore: record v0.2.0 release publication [skip ci]"
           git push
