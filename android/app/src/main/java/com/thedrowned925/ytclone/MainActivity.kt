@@ -3,8 +3,11 @@ package com.thedrowned925.ytclone
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,6 +27,14 @@ class MainActivity : ComponentActivity() {
         ActivityResultContracts.RequestPermission(),
     ) { }
 
+    private val legacyStoragePermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { }
+
+    private val allFilesAccessSettings = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         settingsStore = SettingsStore(this)
@@ -31,12 +42,16 @@ class MainActivity : ComponentActivity() {
         tokenConfigured.value = !settingsStore.gitHubToken().isNullOrBlank()
         sharedUrl.value = extractSharedUrl(intent)
         requestNotificationPermissionIfNeeded()
+        requestDownloadsAccessIfNeeded()
 
         setContent {
             YTCloneApp(
                 incomingUrl = sharedUrl.value,
                 onIncomingUrlConsumed = { sharedUrl.value = null },
-                onArchive = { url, options -> IngestQueue.enqueue(this, url, options) },
+                onArchive = { url, options ->
+                    requestDownloadsAccessIfNeeded()
+                    IngestQueue.enqueue(this, url, options)
+                },
                 mediaRepo = mediaRepo.value,
                 tokenConfigured = tokenConfigured.value,
                 onSaveStorageSettings = { repo, newToken ->
@@ -60,6 +75,24 @@ class MainActivity : ComponentActivity() {
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    private fun requestDownloadsAccessIfNeeded() {
+        when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager() -> {
+                val appIntent = Intent(
+                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:$packageName"),
+                )
+                val fallback = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                val target = if (appIntent.resolveActivity(packageManager) != null) appIntent else fallback
+                allFilesAccessSettings.launch(target)
+            }
+            Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q &&
+                ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED -> {
+                legacyStoragePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            }
         }
     }
 
