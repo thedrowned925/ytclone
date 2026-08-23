@@ -11,8 +11,8 @@ android {
         applicationId = "com.thedrowned925.ytclone"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.1.5"
+        versionCode = 7
+        versionName = "0.1.6"
     }
 
     buildFeatures {
@@ -26,12 +26,8 @@ android {
     }
 
     packaging {
-        jniLibs {
-            useLegacyPackaging = true
-        }
-        resources {
-            excludes += "/META-INF/{AL2.0,LGPL2.1}"
-        }
+        jniLibs { useLegacyPackaging = true }
+        resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
     }
 }
 

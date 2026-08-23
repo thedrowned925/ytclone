@@ -1,13 +1,16 @@
 package com.thedrowned925.ytclone
 
 import android.Manifest
+import android.app.PictureInPictureParams
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
+import android.util.Rational
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -21,19 +24,13 @@ class MainActivity : ComponentActivity() {
     private val sharedUrl = mutableStateOf<String?>(null)
     private val mediaRepo = mutableStateOf("")
     private val tokenConfigured = mutableStateOf(false)
+    private val pipMode = mutableStateOf(false)
+    private var pipEligible = false
     private lateinit var settingsStore: SettingsStore
 
-    private val notificationPermission = registerForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { }
-
-    private val legacyStoragePermission = registerForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { }
-
-    private val allFilesAccessSettings = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult(),
-    ) { }
+    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    private val legacyStoragePermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    private val allFilesAccessSettings = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -43,6 +40,7 @@ class MainActivity : ComponentActivity() {
         sharedUrl.value = extractSharedUrl(intent)
         requestNotificationPermissionIfNeeded()
         requestDownloadsAccessIfNeeded()
+        updatePictureInPictureParams()
 
         setContent {
             YTCloneApp(
@@ -60,6 +58,11 @@ class MainActivity : ComponentActivity() {
                     mediaRepo.value = settingsStore.mediaRepo()
                     tokenConfigured.value = !settingsStore.gitHubToken().isNullOrBlank()
                 },
+                isPipMode = pipMode.value,
+                onPlaybackActiveChanged = { active ->
+                    pipEligible = active
+                    updatePictureInPictureParams()
+                },
             )
         }
     }
@@ -70,24 +73,43 @@ class MainActivity : ComponentActivity() {
         extractSharedUrl(intent)?.let { sharedUrl.value = it }
     }
 
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        // Android 12+ uses setAutoEnterEnabled for the smooth system gesture.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S && pipEligible && !isInPictureInPictureMode) {
+            runCatching { enterPictureInPictureMode(buildPipParams(autoEnter = false)) }
+        }
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        pipMode.value = isInPictureInPictureMode
+    }
+
+    private fun updatePictureInPictureParams() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            setPictureInPictureParams(buildPipParams(autoEnter = pipEligible))
+        }
+    }
+
+    private fun buildPipParams(autoEnter: Boolean): PictureInPictureParams {
+        val builder = PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9))
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) builder.setAutoEnterEnabled(autoEnter)
+        return builder.build()
+    }
+
     private fun requestNotificationPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
+        ) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     private fun requestDownloadsAccessIfNeeded() {
         when {
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager() -> {
-                val appIntent = Intent(
-                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
-                    Uri.parse("package:$packageName"),
-                )
+                val appIntent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName"))
                 val fallback = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-                val target = if (appIntent.resolveActivity(packageManager) != null) appIntent else fallback
-                allFilesAccessSettings.launch(target)
+                allFilesAccessSettings.launch(if (appIntent.resolveActivity(packageManager) != null) appIntent else fallback)
             }
             Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q &&
                 ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED -> {

@@ -13,9 +13,10 @@ import kotlin.math.min
 class GitHubChunkDataSource(
     private val reader: GitHubReleaseReader,
     private val primaryReleaseTag: String,
-    private val logicalName: String,
+    private val fixedLogicalName: String? = null,
 ) : BaseDataSource(true) {
     private var uri: Uri? = null
+    private var logicalName: String = ""
     private var logicalFile: GitHubReleaseReader.LogicalFile? = null
     private var logicalPosition = 0L
     private var bytesRemaining = 0L
@@ -26,6 +27,9 @@ class GitHubChunkDataSource(
     override fun open(dataSpec: DataSpec): Long {
         transferInitializing(dataSpec)
         uri = dataSpec.uri
+        logicalName = fixedLogicalName
+            ?: Uri.decode(dataSpec.uri.lastPathSegment.orEmpty()).takeIf(String::isNotBlank)
+            ?: throw IOException("ytclone URI logicalName içermiyor: ${dataSpec.uri}")
         val file = reader.logicalFile(primaryReleaseTag, logicalName)
         logicalFile = file
 
@@ -35,12 +39,7 @@ class GitHubChunkDataSource(
 
         logicalPosition = dataSpec.position
         val available = file.sizeBytes - logicalPosition
-        bytesRemaining = if (dataSpec.length == C.LENGTH_UNSET.toLong()) {
-            available
-        } else {
-            min(available, dataSpec.length)
-        }
-
+        bytesRemaining = if (dataSpec.length == C.LENGTH_UNSET.toLong()) available else min(available, dataSpec.length)
         opened = true
         transferStarted(dataSpec)
         return bytesRemaining
@@ -49,18 +48,15 @@ class GitHubChunkDataSource(
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         if (length == 0) return 0
         if (bytesRemaining == 0L) return C.RESULT_END_OF_INPUT
-
         ensureSlice()
         val slice = currentSlice ?: return C.RESULT_END_OF_INPUT
         val toRead = min(length.toLong(), min(bytesRemaining, currentSliceRemaining)).toInt()
         val read = slice.input.read(buffer, offset, toRead)
         if (read < 0) throw EOFException("GitHub chunk beklenenden erken bitti: $logicalName")
-
         logicalPosition += read
         bytesRemaining -= read
         currentSliceRemaining -= read
         bytesTransferred(read)
-
         if (currentSliceRemaining == 0L) closeCurrentSlice()
         return read
     }
@@ -71,6 +67,7 @@ class GitHubChunkDataSource(
         closeCurrentSlice()
         uri = null
         logicalFile = null
+        logicalName = ""
         bytesRemaining = 0L
         logicalPosition = 0L
         if (opened) {
@@ -82,16 +79,12 @@ class GitHubChunkDataSource(
     private fun ensureSlice() {
         if (currentSlice != null && currentSliceRemaining > 0) return
         closeCurrentSlice()
-
         val file = logicalFile ?: error("DataSource açılmadı")
         val part = file.parts.firstOrNull { logicalPosition >= it.offset && logicalPosition < it.offset + it.sizeBytes }
-            ?: throw IOException("Storage manifest byte ${logicalPosition} için chunk içermiyor")
-
+            ?: throw IOException("Storage manifest byte $logicalPosition için chunk içermiyor")
         val assetOffset = logicalPosition - part.offset
-        val partRemaining = part.sizeBytes - assetOffset
-        val wanted = min(bytesRemaining, partRemaining)
+        val wanted = min(bytesRemaining, part.sizeBytes - assetOffset)
         if (wanted <= 0) return
-
         currentSlice = reader.openPartSlice(part, assetOffset, wanted)
         currentSliceRemaining = wanted
     }
@@ -105,8 +98,8 @@ class GitHubChunkDataSource(
     class Factory(
         private val reader: GitHubReleaseReader,
         private val primaryReleaseTag: String,
-        private val logicalName: String,
+        private val fixedLogicalName: String? = null,
     ) : DataSource.Factory {
-        override fun createDataSource(): DataSource = GitHubChunkDataSource(reader, primaryReleaseTag, logicalName)
+        override fun createDataSource(): DataSource = GitHubChunkDataSource(reader, primaryReleaseTag, fixedLogicalName)
     }
 }
