@@ -58,11 +58,23 @@ fun IngestProgressCard(workId: String?) {
 
     val info = workInfo
     val state = info?.state
-    val rawPercent = info?.progress?.getInt(YoutubeIngestWorker.PROGRESS_PERCENT, 0) ?: 0
-    val percent = if (state == WorkInfo.State.SUCCEEDED) 100 else rawPercent.coerceIn(0, 100)
+    val failed = state == WorkInfo.State.FAILED || state == WorkInfo.State.CANCELLED
+
+    val runningPercent = info?.progress?.getInt(YoutubeIngestWorker.PROGRESS_PERCENT, 0) ?: 0
+    val failedPercent = info?.outputData?.getInt(YoutubeIngestWorker.OUTPUT_FAILED_PERCENT, runningPercent)
+        ?: runningPercent
+    val percent = when (state) {
+        WorkInfo.State.SUCCEEDED -> 100
+        WorkInfo.State.FAILED -> failedPercent.coerceIn(0, 99)
+        else -> runningPercent.coerceIn(0, 100)
+    }
+
     val stage = when (state) {
         WorkInfo.State.SUCCEEDED -> "complete"
-        WorkInfo.State.FAILED, WorkInfo.State.CANCELLED -> "failed"
+        WorkInfo.State.FAILED -> info.outputData.getString(YoutubeIngestWorker.OUTPUT_FAILED_STAGE)
+            ?: info.progress.getString(YoutubeIngestWorker.PROGRESS_STAGE)
+            ?: "metadata"
+        WorkInfo.State.CANCELLED -> info?.progress?.getString(YoutubeIngestWorker.PROGRESS_STAGE) ?: "metadata"
         WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED -> "queued"
         else -> info?.progress?.getString(YoutubeIngestWorker.PROGRESS_STAGE) ?: "queued"
     }
@@ -80,7 +92,6 @@ fun IngestProgressCard(workId: String?) {
     val totalBytes = info?.progress?.getLong(YoutubeIngestWorker.PROGRESS_TOTAL_BYTES, 0L) ?: 0L
     val speed = info?.progress?.getLong(YoutubeIngestWorker.PROGRESS_SPEED_BPS, 0L) ?: 0L
     val eta = info?.progress?.getLong(YoutubeIngestWorker.PROGRESS_ETA_SECONDS, 0L) ?: 0L
-    val failed = state == WorkInfo.State.FAILED || state == WorkInfo.State.CANCELLED
     val activeIndex = activeStepIndex(stage, percent)
 
     Column(
@@ -127,9 +138,6 @@ fun IngestProgressCard(workId: String?) {
                 fontSize = 11.sp,
             )
         }
-        if ((info?.runAttemptCount ?: 0) > 0) {
-            Text("Deneme: ${(info?.runAttemptCount ?: 0) + 1}", color = Color(0xFF888888), fontSize = 11.sp)
-        }
 
         Spacer(Modifier.height(14.dp))
         ingestSteps.forEachIndexed { index, step ->
@@ -173,23 +181,24 @@ private fun activeStepIndex(stage: String, percent: Int): Int {
     val normalized = when (stage) {
         "queued" -> "ytdlp-update"
         "audio-extract" -> "download-audio"
+        "download-complete" -> "channel"
         "published" -> "verify"
         "waiting-settings" -> "chunk-plan"
-        "failed" -> when {
-            percent >= 99 -> "cleanup"
-            percent >= 96 -> "catalog"
-            percent >= 90 -> "verify"
-            percent >= 72 -> "upload"
-            percent >= 71 -> "chunk-plan"
-            percent >= 69 -> "channel"
-            percent >= 53 -> "download-audio"
-            percent >= 4 -> "download-video"
-            percent >= 2 -> "metadata"
-            else -> "ytdlp-update"
-        }
         else -> stage
     }
-    return ingestSteps.indexOfFirst { it.key == normalized }.takeIf { it >= 0 } ?: 0
+    return ingestSteps.indexOfFirst { it.key == normalized }.takeIf { it >= 0 }
+        ?: when {
+            percent >= 99 -> ingestSteps.indexOfFirst { it.key == "cleanup" }
+            percent >= 96 -> ingestSteps.indexOfFirst { it.key == "catalog" }
+            percent >= 90 -> ingestSteps.indexOfFirst { it.key == "verify" }
+            percent >= 72 -> ingestSteps.indexOfFirst { it.key == "upload" }
+            percent >= 71 -> ingestSteps.indexOfFirst { it.key == "chunk-plan" }
+            percent >= 69 -> ingestSteps.indexOfFirst { it.key == "channel" }
+            percent >= 53 -> ingestSteps.indexOfFirst { it.key == "download-audio" }
+            percent >= 4 -> ingestSteps.indexOfFirst { it.key == "download-video" }
+            percent >= 2 -> ingestSteps.indexOfFirst { it.key == "metadata" }
+            else -> 0
+        }
 }
 
 private fun formatBytes(bytes: Long): String = when {
