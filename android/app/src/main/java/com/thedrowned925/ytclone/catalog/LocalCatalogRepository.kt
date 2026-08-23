@@ -35,7 +35,9 @@ class LocalCatalogRepository(context: Context) {
         val audioTracks: List<Audio>,
     )
 
-    private val ingestRoot = File(context.filesDir, "ingest")
+    // Large media lives only in Download/YTClone/Working while an ingest is in
+    // progress. This private directory contains lightweight JSON state only.
+    private val ingestRoot = File(context.filesDir, "ingest-state")
 
     fun listVideos(): List<Video> {
         if (!ingestRoot.exists()) return emptyList()
@@ -102,20 +104,13 @@ class LocalCatalogRepository(context: Context) {
             )
         }
 
-        val thumbnail = jobDir.listFiles()
-            ?.firstOrNull { file ->
-                file.isFile &&
-                    file.name.startsWith("video.") &&
-                    file.extension.lowercase() in setOf("webp", "jpg", "jpeg", "png")
-            }
-
         Video(
             id = jobDir.name,
             title = json.optString("title", "Adsız video"),
             channel = json.optString("channel", "Bilinmeyen kanal"),
             durationSeconds = json.optDouble("durationSeconds", 0.0),
             status = json.optString("status", "processing"),
-            thumbnailFile = thumbnail,
+            thumbnailFile = null,
             primaryReleaseTag = json.optJSONObject("storage")?.optString("primaryReleaseTag")?.takeIf(String::isNotBlank),
             qualities = qualities.sortedWith(compareByDescending<Quality> { it.height }.thenByDescending { it.fps }.thenBy { it.id }),
             audioTracks = audioTracks.sortedWith(compareByDescending<Audio> { it.isDefault }.thenBy { it.language }.thenBy { it.label }),
