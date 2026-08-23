@@ -5,6 +5,7 @@ import com.yausername.youtubedl_android.YoutubeDLRequest
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.net.URL
 import kotlin.math.roundToInt
 
 class YoutubeImportEngine {
@@ -13,9 +14,23 @@ class YoutubeImportEngine {
         val channel: String,
         val sourceHeight: Int,
         val sourceVideo: File,
+        val videoVariants: List<VideoVariant>,
         val audioTracks: List<AudioTrack>,
         val manifestFile: File,
+        val channelFile: File,
     )
+
+    data class VideoVariant(
+        val formatId: String,
+        val height: Int,
+        val fps: Int,
+        val codec: String,
+        val container: String,
+        val file: File,
+        val containsAudio: Boolean,
+    ) {
+        val id: String get() = "${height}p${fps.takeIf { it > 30 } ?: ""}"
+    }
 
     data class AudioTrack(
         val formatId: String,
@@ -32,8 +47,10 @@ class YoutubeImportEngine {
         val vcodec: String,
         val acodec: String,
         val height: Int,
+        val fps: Int,
         val tbr: Double,
         val abr: Double,
+        val filesize: Long,
         val language: String,
         val note: String,
         val languagePreference: Int,
@@ -47,44 +64,77 @@ class YoutubeImportEngine {
         onProgress: (stage: String, percent: Int, detail: String) -> Unit,
     ): ImportedMedia {
         jobDir.mkdirs()
-        onProgress("metadata", 1, "Video bilgileri okunuyor")
+        onProgress("metadata", 1, "Video bilgileri ve format listesi okunuyor")
 
         val metadata = readMetadata(url, "$processId-metadata")
         val formats = readFormats(metadata)
-        val videoFormat = chooseSourceVideo(formats)
-            ?: error("Uygun video formatı bulunamadı")
+        val selectedVideos = chooseVideoVariants(formats)
+        require(selectedVideos.isNotEmpty()) { "4K veya altında uygun video formatı bulunamadı" }
+
         val selectedAudio = chooseAudioTracks(formats).let { tracks ->
             if (options.allAudioTracks) tracks else tracks.take(1)
         }
 
-        onProgress("download-video", 3, "Kaynak video indiriliyor")
-        val videoRequest = YoutubeDLRequest(url).apply {
-            addOption("--no-playlist")
-            addOption("-f", videoFormat.id)
-            addOption("-o", File(jobDir, "video.source.%(ext)s").absolutePath)
-            addOption("--write-info-json")
-            addOption("--write-thumbnail")
-            if (options.subtitles) {
-                addOption("--write-subs")
-                addOption("--write-auto-subs")
-                addOption("--sub-langs", "all")
-                addOption("--sub-format", "vtt/best")
+        val downloadedVideos = mutableListOf<VideoVariant>()
+        selectedVideos.forEachIndexed { index, format ->
+            val fpsSuffix = if (format.fps > 30) "-${format.fps}fps" else "-${format.fps.coerceAtLeast(1)}fps"
+            val base = "video.${format.height}p$fpsSuffix.${sanitize(format.id)}."
+            val start = 4 + ((index.toDouble() / selectedVideos.size) * 48.0).roundToInt()
+            onProgress(
+                "download-video",
+                start,
+                "${format.height}p ${format.fps} FPS indiriliyor (${index + 1}/${selectedVideos.size})",
+            )
+
+            val request = YoutubeDLRequest(url).apply {
+                addOption("--no-playlist")
+                addOption("-f", format.id)
+                addOption("-o", File(jobDir, "${base}%(ext)s").absolutePath)
+                if (index == 0) {
+                    addOption("--write-info-json")
+                    addOption("--write-thumbnail")
+                    if (options.subtitles) {
+                        addOption("--write-subs")
+                        addOption("--write-auto-subs")
+                        addOption("--sub-langs", "all")
+                        addOption("--sub-format", "vtt/best")
+                    }
+                }
             }
-        }
 
-        executeChecked(videoRequest, "$processId-video") { progress, _, line ->
-            val mapped = 3 + (progress.coerceIn(0f, 100f) * 0.42f).roundToInt()
-            onProgress("download-video", mapped, line)
-        }
+            executeChecked(request, "$processId-video-$index") { progress, eta, line ->
+                val span = 48.0 / selectedVideos.size.coerceAtLeast(1)
+                val mapped = 4 + ((index * span) + (progress.coerceIn(0f, 100f) / 100f * span)).roundToInt()
+                val etaText = if (eta > 0) " • kalan ~${formatEta(eta)}" else ""
+                onProgress(
+                    "download-video",
+                    mapped.coerceAtMost(52),
+                    "${format.height}p ${format.fps} FPS • ${progress.roundToInt()}%$etaText • ${cleanLine(line)}",
+                )
+            }
 
-        val sourceVideo = findDownloaded(jobDir, "video.source.")
-            ?: error("Kaynak video dosyası indirildi fakat bulunamadı")
+            val file = findDownloaded(jobDir, base)
+                ?: error("${format.height}p ${format.fps} FPS indirildi fakat dosya bulunamadı")
+            downloadedVideos += VideoVariant(
+                formatId = format.id,
+                height = format.height,
+                fps = format.fps,
+                codec = format.vcodec,
+                container = format.ext,
+                file = file,
+                containsAudio = format.acodec != "none",
+            )
+        }
 
         val downloadedAudio = mutableListOf<AudioTrack>()
         selectedAudio.forEachIndexed { index, format ->
-            val base = "audio.${(index + 1).toString().padStart(3, '0')}."
-            val start = 46 + ((index.toDouble() / selectedAudio.size.coerceAtLeast(1)) * 24.0).roundToInt()
-            onProgress("download-audio", start, "Ses ${index + 1}/${selectedAudio.size}: ${format.language} ${format.note}")
+            val base = "audio.${(index + 1).toString().padStart(3, '0')}.${sanitize(format.language)}."
+            val start = 53 + ((index.toDouble() / selectedAudio.size.coerceAtLeast(1)) * 15.0).roundToInt()
+            onProgress(
+                "download-audio",
+                start,
+                "Ses ${index + 1}/${selectedAudio.size}: ${format.language} ${format.note}",
+            )
 
             val request = YoutubeDLRequest(url).apply {
                 addOption("--no-playlist")
@@ -92,10 +142,15 @@ class YoutubeImportEngine {
                 addOption("-o", File(jobDir, "${base}%(ext)s").absolutePath)
             }
 
-            executeChecked(request, "$processId-audio-$index") { progress, _, line ->
-                val span = 24.0 / selectedAudio.size.coerceAtLeast(1)
-                val mapped = 46 + ((index * span) + (progress.coerceIn(0f, 100f) / 100f * span)).roundToInt()
-                onProgress("download-audio", mapped.coerceAtMost(70), line)
+            executeChecked(request, "$processId-audio-$index") { progress, eta, line ->
+                val span = 15.0 / selectedAudio.size.coerceAtLeast(1)
+                val mapped = 53 + ((index * span) + (progress.coerceIn(0f, 100f) / 100f * span)).roundToInt()
+                val etaText = if (eta > 0) " • kalan ~${formatEta(eta)}" else ""
+                onProgress(
+                    "download-audio",
+                    mapped.coerceAtMost(68),
+                    "Ses ${index + 1}/${selectedAudio.size} • ${progress.roundToInt()}%$etaText • ${cleanLine(line)}",
+                )
             }
 
             val file = findDownloaded(jobDir, base)
@@ -110,18 +165,29 @@ class YoutubeImportEngine {
             )
         }
 
-        val manifest = buildManifest(metadata, videoFormat, sourceVideo, downloadedAudio, options)
+        onProgress("channel", 69, "Kanal profili, avatarı ve banner bilgileri hazırlanıyor")
+        val channelSnapshot = buildChannelSnapshot(metadata, "$processId-channel", jobDir)
+        val channelFile = File(jobDir, "channel.json").apply { writeText(channelSnapshot.toString(2)) }
+
+        val manifest = buildManifest(metadata, downloadedVideos, downloadedAudio, options, jobDir, channelFile)
         val manifestFile = File(jobDir, "manifest.json")
         manifestFile.writeText(manifest.toString(2))
 
-        onProgress("download-complete", 70, "Video, sesler, altyazılar ve metadata hazır")
+        onProgress(
+            "download-complete",
+            70,
+            "${downloadedVideos.size} kalite/FPS sürümü, ${downloadedAudio.size} ses ve altyazılar hazır",
+        )
+        val source = downloadedVideos.maxWith(compareBy<VideoVariant> { it.height }.thenBy { it.fps })
         return ImportedMedia(
             title = metadata.optString("title", "Adsız video"),
             channel = metadata.optString("channel", metadata.optString("uploader", "Bilinmeyen kanal")),
-            sourceHeight = videoFormat.height,
-            sourceVideo = sourceVideo,
+            sourceHeight = source.height,
+            sourceVideo = source.file,
+            videoVariants = downloadedVideos,
             audioTracks = downloadedAudio,
             manifestFile = manifestFile,
+            channelFile = channelFile,
         )
     }
 
@@ -132,6 +198,45 @@ class YoutubeImportEngine {
             addOption("--no-playlist")
             addOption("--no-warnings")
         }
+        return executeJson(request, processId)
+    }
+
+    private fun buildChannelSnapshot(metadata: JSONObject, processId: String, jobDir: File): JSONObject {
+        val channelUrl = metadata.optString("channel_url").takeIf { it.startsWith("http") }
+        val channelMetadata = channelUrl?.let { url ->
+            runCatching {
+                val request = YoutubeDLRequest(url).apply {
+                    addOption("--dump-single-json")
+                    addOption("--flat-playlist")
+                    addOption("--playlist-end", "1")
+                    addOption("--skip-download")
+                    addOption("--no-warnings")
+                }
+                executeJson(request, processId)
+            }.getOrNull()
+        }
+
+        val merged = channelMetadata ?: metadata
+        val thumbnails = merged.optJSONArray("thumbnails") ?: JSONArray()
+        val avatar = chooseChannelImage(thumbnails, wantBanner = false)
+        val banner = chooseChannelImage(thumbnails, wantBanner = true)
+        val avatarFile = avatar?.let { downloadImage(it, File(jobDir, "channel-avatar${extensionFromUrl(it)}")) }
+        val bannerFile = banner?.let { downloadImage(it, File(jobDir, "channel-banner${extensionFromUrl(it)}")) }
+
+        return JSONObject()
+            .put("schemaVersion", 1)
+            .put("channelId", metadata.optString("channel_id", metadata.optString("uploader_id")))
+            .put("name", metadata.optString("channel", metadata.optString("uploader", "Bilinmeyen kanal")))
+            .put("url", channelUrl ?: metadata.optString("uploader_url"))
+            .put("handle", metadata.optString("uploader_id"))
+            .put("description", merged.optString("description"))
+            .put("subscriberCount", merged.optLong("channel_follower_count", metadata.optLong("channel_follower_count", 0L)))
+            .put("avatarLogicalName", avatarFile?.name ?: JSONObject.NULL)
+            .put("bannerLogicalName", bannerFile?.name ?: JSONObject.NULL)
+            .put("source", "youtube")
+    }
+
+    private fun executeJson(request: YoutubeDLRequest, processId: String): JSONObject {
         val response = YoutubeDL.getInstance().execute(request, processId, null)
         if (response.exitCode != 0) {
             error("yt-dlp metadata hatası: ${response.err.ifBlank { "exit=${response.exitCode}" }}")
@@ -165,6 +270,7 @@ class YoutubeImportEngine {
                 val item = array.optJSONObject(index) ?: continue
                 val id = item.optString("format_id")
                 if (id.isBlank()) continue
+                val fps = item.optDoubleSafe("fps").roundToInt().coerceAtLeast(1)
                 add(
                     FormatCandidate(
                         id = id,
@@ -172,8 +278,10 @@ class YoutubeImportEngine {
                         vcodec = item.optString("vcodec", "none"),
                         acodec = item.optString("acodec", "none"),
                         height = item.optInt("height", 0),
+                        fps = fps,
                         tbr = item.optDoubleSafe("tbr"),
                         abr = item.optDoubleSafe("abr"),
+                        filesize = item.optLongSafe("filesize").takeIf { it > 0 } ?: item.optLongSafe("filesize_approx"),
                         language = item.optString("language").takeUnless { it.isBlank() || it == "null" } ?: "und",
                         note = item.optString("format_note").takeUnless { it == "null" } ?: "",
                         languagePreference = item.optInt("language_preference", -1),
@@ -183,23 +291,23 @@ class YoutubeImportEngine {
         }
     }
 
-    private fun chooseSourceVideo(formats: List<FormatCandidate>): FormatCandidate? {
-        val videoOnly = formats
-            .asSequence()
-            .filter { it.vcodec != "none" && it.acodec == "none" && it.height > 0 }
-            .maxByOrNull { videoScore(it) }
-        if (videoOnly != null) return videoOnly
-
-        return formats
-            .asSequence()
-            .filter { it.vcodec != "none" && it.height > 0 }
-            .maxByOrNull { videoScore(it) }
+    private fun chooseVideoVariants(formats: List<FormatCandidate>): List<FormatCandidate> {
+        val allowed = formats.filter {
+            it.vcodec != "none" && it.height in 1..MAX_HEIGHT
+        }
+        return allowed
+            .groupBy { it.height to it.fps }
+            .values
+            .mapNotNull { variants ->
+                variants.maxByOrNull { format ->
+                    (if (format.acodec == "none") 10_000_000_000L else 0L) +
+                        (if (format.ext == "mp4") 1_000_000_000L else 0L) +
+                        (format.tbr * 10_000).toLong() +
+                        format.filesize.coerceAtLeast(0L) / 1024L
+                }
+            }
+            .sortedWith(compareByDescending<FormatCandidate> { it.height }.thenByDescending { it.fps })
     }
-
-    private fun videoScore(format: FormatCandidate): Long =
-        (format.height.toLong() * 1_000_000L) +
-            (format.tbr * 100).toLong() +
-            if (format.ext == "mp4") 10_000L else 0L
 
     private fun chooseAudioTracks(formats: List<FormatCandidate>): List<FormatCandidate> {
         val audio = formats.filter { it.vcodec == "none" && it.acodec != "none" }
@@ -232,12 +340,13 @@ class YoutubeImportEngine {
 
     private fun buildManifest(
         metadata: JSONObject,
-        video: FormatCandidate,
-        sourceVideo: File,
+        videos: List<VideoVariant>,
         audioTracks: List<AudioTrack>,
         options: IngestOptions,
+        jobDir: File,
+        channelFile: File,
     ): JSONObject = JSONObject().apply {
-        put("schemaVersion", 2)
+        put("schemaVersion", 3)
         put("source", "youtube")
         put("sourceId", metadata.optString("id"))
         put("webpageUrl", metadata.optString("webpage_url"))
@@ -249,32 +358,88 @@ class YoutubeImportEngine {
         put("uploadDate", metadata.optString("upload_date"))
         put("durationSeconds", metadata.optDouble("duration", 0.0))
         put("thumbnail", metadata.optString("thumbnail"))
+        put("maxArchivedHeight", MAX_HEIGHT)
+        put("channelLogicalName", channelFile.name)
         put("ingestOptions", JSONObject().apply {
             put("allAudioTracks", options.allAudioTracks)
             put("subtitles", options.subtitles)
-            put("keepOriginal", options.keepOriginal)
-            put("createRenditions", options.createRenditions)
+            put("keepOriginal", true)
+            put("createRenditions", false)
+            put("nativeAllQualities", true)
         })
-        put("sourceVideo", JSONObject().apply {
-            put("logicalName", sourceVideo.name)
-            put("formatId", video.id)
-            put("height", video.height)
-            put("codec", video.vcodec)
-            put("container", video.ext)
-            put("containsAudio", video.acodec != "none")
+
+        val source = videos.maxWith(compareBy<VideoVariant> { it.height }.thenBy { it.fps })
+        put("sourceVideo", videoJson(source))
+        put("qualities", JSONObject().apply {
+            videos.forEach { video -> put(video.id, videoJson(video)) }
         })
         put("audioTracks", JSONArray().apply {
             audioTracks.forEach { track ->
-                put(JSONObject().apply {
-                    put("logicalName", track.file.name)
-                    put("formatId", track.formatId)
-                    put("language", track.language)
-                    put("label", track.label)
-                    put("codec", track.codec)
-                    put("default", track.isDefault)
-                })
+                put(JSONObject()
+                    .put("logicalName", track.file.name)
+                    .put("formatId", track.formatId)
+                    .put("language", track.language)
+                    .put("label", track.label)
+                    .put("codec", track.codec)
+                    .put("default", track.isDefault))
             }
         })
+        put("subtitles", JSONArray().apply {
+            jobDir.listFiles()
+                ?.filter { it.isFile && it.extension.lowercase() in setOf("vtt", "srt", "ass") }
+                ?.sortedBy { it.name }
+                ?.forEach { file ->
+                    put(JSONObject()
+                        .put("logicalName", file.name)
+                        .put("language", subtitleLanguage(file.name)))
+                }
+        })
+        put("status", "downloaded")
+    }
+
+    private fun videoJson(video: VideoVariant): JSONObject = JSONObject()
+        .put("logicalName", video.file.name)
+        .put("formatId", video.formatId)
+        .put("height", video.height)
+        .put("fps", video.fps)
+        .put("codec", video.codec)
+        .put("container", video.container)
+        .put("containsAudio", video.containsAudio)
+
+    private fun chooseChannelImage(thumbnails: JSONArray, wantBanner: Boolean): String? {
+        val items = buildList {
+            for (index in 0 until thumbnails.length()) {
+                val item = thumbnails.optJSONObject(index) ?: continue
+                val url = item.optString("url")
+                if (!url.startsWith("http")) continue
+                val id = item.optString("id").lowercase()
+                val width = item.optInt("width", 0)
+                val height = item.optInt("height", 0)
+                val ratio = if (height > 0) width.toDouble() / height else 0.0
+                add(Triple(url, id, Triple(width, height, ratio)))
+            }
+        }
+        if (items.isEmpty()) return null
+        val explicit = items.filter { (_, id, _) -> id.contains(if (wantBanner) "banner" else "avatar") }
+        val pool = explicit.ifEmpty {
+            if (wantBanner) items.filter { it.third.third >= 2.0 } else items.filter { it.third.third in 0.75..1.35 }
+        }.ifEmpty { items }
+        return if (wantBanner) pool.maxByOrNull { it.third.first.toLong() * it.third.second }?.first
+        else pool.minByOrNull { (it.third.first.coerceAtLeast(1) * it.third.second.coerceAtLeast(1)) }?.first
+    }
+
+    private fun downloadImage(url: String, target: File): File? = runCatching {
+        URL(url).openStream().use { input -> target.outputStream().use { output -> input.copyTo(output) } }
+        target.takeIf { it.length() > 0L }
+    }.getOrNull()
+
+    private fun extensionFromUrl(url: String): String {
+        val clean = url.substringBefore('?').lowercase()
+        return when {
+            clean.endsWith(".png") -> ".png"
+            clean.endsWith(".webp") -> ".webp"
+            else -> ".jpg"
+        }
     }
 
     private fun findDownloaded(directory: File, prefix: String): File? =
@@ -284,9 +449,14 @@ class YoutubeImportEngine {
             ?.filterNot { file ->
                 file.name.endsWith(".part") ||
                     file.name.endsWith(".info.json") ||
-                    file.extension.lowercase() in setOf("vtt", "srt", "webp", "jpg", "jpeg", "png", "json")
+                    file.extension.lowercase() in setOf("vtt", "srt", "ass", "webp", "jpg", "jpeg", "png", "json")
             }
             ?.maxByOrNull { it.length() }
+
+    private fun subtitleLanguage(name: String): String {
+        val parts = name.split('.')
+        return parts.dropLast(1).lastOrNull { it.matches(Regex("[A-Za-z]{2,3}(?:-[A-Za-z0-9]+)?")) } ?: "und"
+    }
 
     private fun JSONObject.optDoubleSafe(name: String): Double {
         val value = opt(name) ?: return 0.0
@@ -295,5 +465,26 @@ class YoutubeImportEngine {
             is String -> value.toDoubleOrNull() ?: 0.0
             else -> 0.0
         }
+    }
+
+    private fun JSONObject.optLongSafe(name: String): Long {
+        val value = opt(name) ?: return 0L
+        return when (value) {
+            is Number -> value.toLong()
+            is String -> value.toLongOrNull() ?: 0L
+            else -> 0L
+        }
+    }
+
+    private fun sanitize(value: String): String = value.replace(Regex("[^A-Za-z0-9._-]"), "_").take(60)
+    private fun cleanLine(value: String): String = value.replace(Regex("\\s+"), " ").trim().take(90)
+    private fun formatEta(seconds: Long): String = when {
+        seconds >= 3600 -> "%dh %02dm".format(seconds / 3600, (seconds % 3600) / 60)
+        seconds >= 60 -> "%dm %02ds".format(seconds / 60, seconds % 60)
+        else -> "${seconds}s"
+    }
+
+    companion object {
+        const val MAX_HEIGHT = 2160
     }
 }

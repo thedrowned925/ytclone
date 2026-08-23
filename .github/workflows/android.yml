@@ -80,29 +80,31 @@ jobs:
 
       - name: Prepare release APK
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk YTClone-0.1.1-debug.apk
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk YTClone-0.1.2-debug.apk
 
-      - name: Publish GitHub Release v0.1.1
+      - name: Publish GitHub Release v0.1.2
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view v0.1.1 >/dev/null 2>&1; then
-            gh release upload v0.1.1 YTClone-0.1.1-debug.apk --clobber
+          if gh release view v0.1.2 >/dev/null 2>&1; then
+            gh release upload v0.1.2 YTClone-0.1.2-debug.apk --clobber
           else
-            gh release create v0.1.1 YTClone-0.1.1-debug.apk \
-              --title "YTClone v0.1.1 - Android Progress Test" \
-              --notes "Android arşivleme ekranına canlı indirme/işleme/chunk/upload ilerlemesi eklendi. Son iş, GitHub repo/token ayarları ve ingest tercihleri uygulama güncellemelerinde korunur. Bu sürümden itibaren CI sabit bir Android imza anahtarı kullanır. v0.1.0 geçici CI debug anahtarıyla imzalandığı için v0.1.0'dan bu sürüme geçişte bir defalık kaldırıp yeniden kurma gerekebilir."
+            gh release create v0.1.2 YTClone-0.1.2-debug.apk \
+              --title "YTClone v0.1.2 - 4K Archive Test" \
+              --notes "Android arşivleyici artık YouTube'daki mevcut çözünürlük/FPS kombinasyonlarını 2160p/4K'ya kadar native olarak indirir; sesler, altyazılar, thumbnail ve kanal snapshot'ı aynı video Release'ine gider. Tek video = tek Release, 1.8 GiB chunk, 3 paralel upload, upload doğrulama, catalog.json/channels.json, detaylı foreground bildirim ilerlemesi ve doğrulama sonrası yerel medya temizliği eklendi. v0.1.1 ile aynı Android imzasını kullanır; normal güncelleme olarak kurulabilir."
           fi
 
       - name: Record successful release publication
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          printf '# Android Release Status\n\n- Release: v0.1.1\n- Asset: YTClone-0.1.1-debug.apk\n- Status: published successfully\n- Source commit: %s\n' "$GITHUB_SHA" > RELEASE-STATUS.md
-          KEY_FINGERPRINT=$(keytool -list -v -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey | sed -n 's/.*SHA256: //p' | head -n 1)
-          printf 'YTClone Android stable signing initialized with v0.1.1\nSHA256: %s\n' "$KEY_FINGERPRINT" > SIGNING-V1-INITIALIZED
+          printf '# Android Release Status\n\n- Release: v0.1.2\n- Asset: YTClone-0.1.2-debug.apk\n- Status: published successfully\n- Source commit: %s\n' "$GITHUB_SHA" > RELEASE-STATUS.md
+          if [ ! -f "SIGNING-V1-INITIALIZED" ]; then
+            KEY_FINGERPRINT=$(keytool -list -v -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey | sed -n 's/.*SHA256: //p' | head -n 1)
+            printf 'YTClone Android stable signing initialized\nSHA256: %s\n' "$KEY_FINGERPRINT" > SIGNING-V1-INITIALIZED
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add RELEASE-STATUS.md SIGNING-V1-INITIALIZED
-          git diff --cached --quiet || git commit -m "chore: record v0.1.1 release publication [skip ci]"
+          git diff --cached --quiet || git commit -m "chore: record v0.1.2 release publication [skip ci]"
           git push

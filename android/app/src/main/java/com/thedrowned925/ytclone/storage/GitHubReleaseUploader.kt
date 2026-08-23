@@ -11,6 +11,9 @@ import org.json.JSONObject
 import java.io.File
 import java.io.RandomAccessFile
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.ceil
 import kotlin.math.min
 
@@ -22,23 +25,35 @@ class GitHubReleaseUploader(
         val primaryReleaseTag: String,
         val releaseTags: List<String>,
         val storageManifest: File,
+        val verified: Boolean,
     )
 
-    private data class ReleaseRef(val id: Long, val tag: String)
+    data class UploadProgress(
+        val stage: String,
+        val percent: Int,
+        val detail: String,
+        val doneBytes: Long,
+        val totalBytes: Long,
+        val speedBytesPerSecond: Long,
+        val etaSeconds: Long,
+    )
+
+    private data class ReleaseRef(val id: Long, val tag: String, val draft: Boolean)
     private data class AssetRef(val id: Long, val name: String, val size: Long)
     private data class PlannedPart(
         val index: Int,
         val start: Long,
         val length: Long,
         val assetName: String,
-        var releaseTag: String = "",
+        val releaseTag: String,
     )
     private data class PlannedFile(
         val file: File,
         val logicalName: String,
         val size: Long,
-        val parts: MutableList<PlannedPart>,
+        val parts: List<PlannedPart>,
     )
+    private data class UploadTask(val file: PlannedFile, val part: PlannedPart)
 
     fun publishJob(
         jobDir: File,
@@ -46,124 +61,164 @@ class GitHubReleaseUploader(
         repoValue: String,
         token: String,
         excludedLogicalNames: Set<String> = emptySet(),
-        onProgress: (percent: Int, detail: String) -> Unit,
+        onProgress: (UploadProgress) -> Unit,
     ): PublishResult {
         val (owner, repo) = parseRepo(repoValue)
         val videoId = mediaManifest.optString("sourceId").takeIf { it.isNotBlank() }
             ?: sha256(mediaManifest.optString("webpageUrl") + mediaManifest.optString("title")).take(16)
-        val baseTag = "ytclone-${sanitizeTag(videoId)}"
+        val releaseTag = "ytclone-${sanitizeTag(videoId)}"
 
-        // Determine the release count first. manifest.json is tiny and remains one
-        // asset; adding the storage metadata below therefore does not change the
-        // number of planned media parts in normal operation.
-        val initialFiles = planFiles(jobDir, excludedLogicalNames)
-        val initialParts = initialFiles.sumOf { it.parts.size }
-        require(initialParts > 0) { "Yüklenecek dosya yok" }
-        val releaseCount = ceil(initialParts / MAX_DATA_ASSETS_PER_RELEASE.toDouble()).toInt().coerceAtLeast(1)
-        val releaseTags = (0 until releaseCount).map { index ->
-            "$baseTag-r${(index + 1).toString().padStart(3, '0')}"
-        }
-
-        // Releases are still drafts at this point, so it is safe to place the
-        // final public catalog metadata in manifest.json before uploading it.
-        // If any later upload fails the Releases stay draft and consumers never
-        // observe a half-published manifest.
-        mediaManifest.put("status", "published")
+        mediaManifest.put("status", "uploading")
         mediaManifest.put(
             "storage",
             JSONObject()
                 .put("provider", "github-release")
-                .put("primaryReleaseTag", releaseTags.first())
-                .put("releaseTags", JSONArray(releaseTags)),
+                .put("primaryReleaseTag", releaseTag)
+                .put("releaseTags", JSONArray().put(releaseTag))
+                .put("singleRelease", true),
         )
         File(jobDir, MEDIA_MANIFEST).writeText(mediaManifest.toString(2))
 
-        val files = planFiles(jobDir, excludedLogicalNames)
+        val files = planFiles(jobDir, excludedLogicalNames, releaseTag)
         val allParts = files.flatMap { it.parts }
-        val finalReleaseCount = ceil(allParts.size / MAX_DATA_ASSETS_PER_RELEASE.toDouble()).toInt().coerceAtLeast(1)
-        check(finalReleaseCount == releaseCount) {
-            "Manifest güncellemesi Release planını değiştirdi; yayın güvenli biçimde durduruldu"
-        }
-
-        allParts.forEachIndexed { index, part ->
-            part.releaseTag = releaseTags[index / MAX_DATA_ASSETS_PER_RELEASE]
+        require(allParts.isNotEmpty()) { "Yüklenecek dosya yok" }
+        require(allParts.size + RESERVED_ASSETS <= MAX_RELEASE_ASSETS) {
+            "Bu video ${allParts.size + RESERVED_ASSETS} Release asset'i gerektiriyor. Tek video = tek Release kuralı nedeniyle 1000 asset sınırı aşılamaz."
         }
 
         val title = mediaManifest.optString("title", videoId)
-        val releases = releaseTags.associateWith { tag ->
-            getOrCreateDraftRelease(owner, repo, tag, title, releaseTags.indexOf(tag) + 1, releaseCount, token)
-        }
-
-        val assetMaps = releases.mapValues { (_, release) ->
-            listAssets(owner, repo, release.id, token).associateBy { it.name }.toMutableMap()
-        }.toMutableMap()
+        val release = getOrCreateRelease(owner, repo, releaseTag, title, token)
+        val assets = listAssets(owner, repo, release.id, token).associateBy { it.name }.toMutableMap()
 
         val totalBytes = files.sumOf { it.size }.coerceAtLeast(1L)
-        var completedBytes = 0L
+        val completedBytes = AtomicLong(0L)
+        val sessionUploadedBytes = AtomicLong(0L)
+        val activeBytes = ConcurrentHashMap<String, Long>()
+        val tasks = mutableListOf<UploadTask>()
+        val progressLock = Any()
+        val startedAt = System.nanoTime()
 
         for (plannedFile in files) {
             for (part in plannedFile.parts) {
-                val release = releases.getValue(part.releaseTag)
-                val assets = assetMaps.getValue(part.releaseTag)
                 val existing = assets[part.assetName]
-
                 if (existing != null && existing.size == part.length) {
-                    completedBytes += part.length
-                    onProgress(percent(completedBytes, totalBytes), "Zaten yüklü: ${plannedFile.logicalName} #${part.index + 1}")
+                    completedBytes.addAndGet(part.length)
                     continue
                 }
-
                 if (existing != null) {
                     deleteAsset(owner, repo, existing.id, token)
                     assets.remove(existing.name)
                 }
-
-                val uploaded = uploadSlice(
-                    owner = owner,
-                    repo = repo,
-                    releaseId = release.id,
-                    file = plannedFile.file,
-                    start = part.start,
-                    length = part.length,
-                    assetName = part.assetName,
-                    token = token,
-                    onBytes = { sent ->
-                        val now = completedBytes + sent
-                        onProgress(percent(now, totalBytes), "Yükleniyor: ${plannedFile.logicalName} #${part.index + 1}/${plannedFile.parts.size}")
-                    },
-                )
-                assets[uploaded.name] = uploaded
-                completedBytes += part.length
+                tasks += UploadTask(plannedFile, part)
             }
         }
 
-        val storageManifestJson = buildStorageManifest(videoId, releaseTags.first(), files)
+        reportProgress(
+            stage = "upload",
+            detail = if (tasks.isEmpty()) "Tüm medya asset'leri zaten GitHub'da" else "GitHub'a paralel yükleme hazırlanıyor",
+            completed = completedBytes.get(),
+            active = 0L,
+            sessionUploaded = 0L,
+            total = totalBytes,
+            startedAt = startedAt,
+            onProgress = onProgress,
+        )
+
+        val executor = Executors.newFixedThreadPool(UPLOAD_CONCURRENCY)
+        try {
+            val futures = tasks.map { task ->
+                executor.submit {
+                    val part = task.part
+                    activeBytes[part.assetName] = 0L
+                    uploadSlice(
+                        owner = owner,
+                        repo = repo,
+                        releaseId = release.id,
+                        file = task.file.file,
+                        start = part.start,
+                        length = part.length,
+                        assetName = part.assetName,
+                        token = token,
+                    ) { sent ->
+                        activeBytes[part.assetName] = sent
+                        synchronized(progressLock) {
+                            val active = activeBytes.values.sum()
+                            reportProgress(
+                                stage = "upload",
+                                detail = "${task.file.logicalName} • parça ${part.index + 1}/${task.file.parts.size}",
+                                completed = completedBytes.get(),
+                                active = active,
+                                sessionUploaded = sessionUploadedBytes.get(),
+                                total = totalBytes,
+                                startedAt = startedAt,
+                                onProgress = onProgress,
+                            )
+                        }
+                    }
+                    activeBytes.remove(part.assetName)
+                    completedBytes.addAndGet(part.length)
+                    sessionUploadedBytes.addAndGet(part.length)
+                }
+            }
+            futures.forEach { it.get() }
+        } catch (error: Throwable) {
+            executor.shutdownNow()
+            throw (error.cause ?: error)
+        } finally {
+            executor.shutdown()
+        }
+
+        val storageManifestJson = buildStorageManifest(videoId, releaseTag, files)
         val storageManifestFile = File(jobDir, STORAGE_MANIFEST)
         storageManifestFile.writeText(storageManifestJson.toString(2))
 
-        val firstRelease = releases.getValue(releaseTags.first())
-        val firstAssets = assetMaps.getValue(releaseTags.first())
-        firstAssets[STORAGE_MANIFEST]?.let { deleteAsset(owner, repo, it.id, token) }
-        uploadWholeFile(owner, repo, firstRelease.id, storageManifestFile, STORAGE_MANIFEST, token)
+        listAssets(owner, repo, release.id, token)
+            .firstOrNull { it.name == STORAGE_MANIFEST }
+            ?.let { deleteAsset(owner, repo, it.id, token) }
+        uploadWholeFile(owner, repo, release.id, storageManifestFile, STORAGE_MANIFEST, token)
 
-        releaseTags.forEachIndexed { index, tag ->
-            onProgress(99, "Release yayınlanıyor ${index + 1}/${releaseTags.size}")
-            publishRelease(owner, repo, releases.getValue(tag).id, token)
-        }
+        onProgress(
+            UploadProgress(
+                stage = "verify",
+                percent = 99,
+                detail = "GitHub asset'leri doğrulanıyor",
+                doneBytes = totalBytes,
+                totalBytes = totalBytes,
+                speedBytesPerSecond = currentSpeed(sessionUploadedBytes.get(), startedAt),
+                etaSeconds = 0,
+            ),
+        )
+        verifyAssets(owner, repo, release.id, files, storageManifestFile, token)
+
+        mediaManifest.put("status", "published")
+        File(jobDir, MEDIA_MANIFEST).writeText(mediaManifest.toString(2))
+        publishRelease(owner, repo, release.id, token)
+        verifyReleasePublished(owner, repo, releaseTag, token)
 
         File(jobDir, "publish.json").writeText(
             JSONObject()
                 .put("videoId", videoId)
-                .put("primaryReleaseTag", releaseTags.first())
-                .put("releaseTags", JSONArray(releaseTags))
+                .put("primaryReleaseTag", releaseTag)
+                .put("releaseTags", JSONArray().put(releaseTag))
+                .put("verified", true)
                 .toString(2),
         )
-        onProgress(100, "GitHub arşivi yayınlandı")
 
-        return PublishResult(videoId, releaseTags.first(), releaseTags, storageManifestFile)
+        onProgress(
+            UploadProgress(
+                stage = "published",
+                percent = 100,
+                detail = "GitHub Release yayınlandı ve doğrulandı",
+                doneBytes = totalBytes,
+                totalBytes = totalBytes,
+                speedBytesPerSecond = currentSpeed(sessionUploadedBytes.get(), startedAt),
+                etaSeconds = 0,
+            ),
+        )
+        return PublishResult(videoId, releaseTag, listOf(releaseTag), storageManifestFile, true)
     }
 
-    private fun planFiles(root: File, excludedLogicalNames: Set<String>): List<PlannedFile> = root.walkTopDown()
+    private fun planFiles(root: File, excludedLogicalNames: Set<String>, releaseTag: String): List<PlannedFile> = root.walkTopDown()
         .filter { it.isFile && it.length() > 0L }
         .filterNot { it.name.endsWith(".part") || it.name == STORAGE_MANIFEST || it.name == "publish.json" }
         .map { file -> file to file.relativeTo(root).invariantSeparatorsPath }
@@ -171,7 +226,7 @@ class GitHubReleaseUploader(
         .map { (file, logical) ->
             val size = file.length()
             val totalParts = maxOf(1, ceil(size / CHUNK_SIZE_BYTES.toDouble()).toInt())
-            val parts = MutableList(totalParts) { index ->
+            val parts = List(totalParts) { index ->
                 val start = index * CHUNK_SIZE_BYTES
                 val length = min(CHUNK_SIZE_BYTES, size - start)
                 PlannedPart(
@@ -179,6 +234,7 @@ class GitHubReleaseUploader(
                     start = start,
                     length = length,
                     assetName = assetName(logical, index, totalParts),
+                    releaseTag = releaseTag,
                 )
             }
             PlannedFile(file, logical, size, parts)
@@ -186,11 +242,13 @@ class GitHubReleaseUploader(
         .sortedBy { it.logicalName }
         .toList()
 
-    private fun buildStorageManifest(videoId: String, primaryTag: String, files: List<PlannedFile>): JSONObject =
+    private fun buildStorageManifest(videoId: String, releaseTag: String, files: List<PlannedFile>): JSONObject =
         JSONObject()
-            .put("schemaVersion", 2)
+            .put("schemaVersion", 3)
             .put("videoId", videoId)
-            .put("primaryReleaseTag", primaryTag)
+            .put("primaryReleaseTag", releaseTag)
+            .put("releaseTags", JSONArray().put(releaseTag))
+            .put("singleRelease", true)
             .put("chunkSizeBytes", CHUNK_SIZE_BYTES)
             .put("files", JSONArray().apply {
                 files.forEach { planned ->
@@ -201,7 +259,7 @@ class GitHubReleaseUploader(
                         .put("parts", JSONArray().apply {
                             planned.parts.forEach { part ->
                                 put(JSONObject()
-                                    .put("releaseTag", part.releaseTag)
+                                    .put("releaseTag", releaseTag)
                                     .put("name", part.assetName)
                                     .put("offset", part.start)
                                     .put("sizeBytes", part.length))
@@ -210,24 +268,35 @@ class GitHubReleaseUploader(
                 }
             })
 
-    private fun getOrCreateDraftRelease(
+    private fun verifyAssets(
         owner: String,
         repo: String,
-        tag: String,
-        title: String,
-        index: Int,
-        total: Int,
+        releaseId: Long,
+        files: List<PlannedFile>,
+        storageManifest: File,
         token: String,
-    ): ReleaseRef {
+    ) {
+        val remote = listAssets(owner, repo, releaseId, token).associateBy { it.name }
+        files.flatMap { it.parts }.forEach { part ->
+            val asset = remote[part.assetName] ?: error("GitHub doğrulama hatası: eksik asset ${part.assetName}")
+            check(asset.size == part.length) {
+                "GitHub doğrulama hatası: ${part.assetName} boyutu ${asset.size}, beklenen ${part.length}"
+            }
+        }
+        val storage = remote[STORAGE_MANIFEST] ?: error("GitHub doğrulama hatası: storage-manifest.json eksik")
+        check(storage.size == storageManifest.length()) { "storage-manifest.json boyutu doğrulanamadı" }
+    }
+
+    private fun getOrCreateRelease(owner: String, repo: String, tag: String, title: String, token: String): ReleaseRef {
         findRelease(owner, repo, tag, token)?.let { return it }
         val body = JSONObject()
             .put("tag_name", tag)
-            .put("name", if (total == 1) title else "$title [$index/$total]")
-            .put("body", "Published by YTClone Android. Chunked media storage.")
+            .put("name", title)
+            .put("body", "Published by YTClone Android. One video, one Release; 1.8 GiB chunk storage.")
             .put("draft", true)
             .put("prerelease", false)
         val json = jsonRequest("POST", "https://api.github.com/repos/$owner/$repo/releases", token, body)
-        return ReleaseRef(json.getLong("id"), json.getString("tag_name"))
+        return ReleaseRef(json.getLong("id"), json.getString("tag_name"), json.optBoolean("draft", true))
     }
 
     private fun findRelease(owner: String, repo: String, tag: String, token: String): ReleaseRef? {
@@ -236,7 +305,9 @@ class GitHubReleaseUploader(
             if (array.length() == 0) return null
             for (i in 0 until array.length()) {
                 val item = array.getJSONObject(i)
-                if (item.optString("tag_name") == tag) return ReleaseRef(item.getLong("id"), tag)
+                if (item.optString("tag_name") == tag) {
+                    return ReleaseRef(item.getLong("id"), tag, item.optBoolean("draft", false))
+                }
             }
             if (array.length() < 100) return null
         }
@@ -297,6 +368,11 @@ class GitHubReleaseUploader(
             token,
             JSONObject().put("draft", false),
         )
+    }
+
+    private fun verifyReleasePublished(owner: String, repo: String, tag: String, token: String) {
+        val release = findRelease(owner, repo, tag, token) ?: error("Release yayınlandıktan sonra bulunamadı")
+        check(!release.draft) { "Release hâlâ draft durumda; yerel dosyalar silinmedi" }
     }
 
     private fun executeAssetRequest(request: Request): AssetRef = client.newCall(request).execute().use { response ->
@@ -364,6 +440,56 @@ class GitHubReleaseUploader(
         }
     }
 
+    private fun reportProgress(
+        stage: String,
+        detail: String,
+        completed: Long,
+        active: Long,
+        sessionUploaded: Long,
+        total: Long,
+        startedAt: Long,
+        onProgress: (UploadProgress) -> Unit,
+    ) {
+        val done = (completed + active).coerceAtMost(total)
+        val speed = currentSpeed(sessionUploaded + active, startedAt)
+        val remaining = (total - done).coerceAtLeast(0L)
+        val eta = if (speed > 0) remaining / speed else 0L
+        val percent = ((done.toDouble() / total.coerceAtLeast(1L)) * 100.0).toInt().coerceIn(0, 98)
+        onProgress(
+            UploadProgress(
+                stage = stage,
+                percent = percent,
+                detail = "$detail • ${formatBytes(done)} / ${formatBytes(total)} • ${formatSpeed(speed)}${if (eta > 0) " • ETA ${formatEta(eta)}" else ""}",
+                doneBytes = done,
+                totalBytes = total,
+                speedBytesPerSecond = speed,
+                etaSeconds = eta,
+            ),
+        )
+    }
+
+    private fun currentSpeed(uploaded: Long, startedAt: Long): Long {
+        val seconds = (System.nanoTime() - startedAt).coerceAtLeast(1L) / 1_000_000_000.0
+        return (uploaded / seconds).toLong().coerceAtLeast(0L)
+    }
+
+    private fun formatBytes(bytes: Long): String = when {
+        bytes >= 1024L * 1024L * 1024L -> "%.2f GiB".format(bytes / (1024.0 * 1024.0 * 1024.0))
+        bytes >= 1024L * 1024L -> "%.1f MiB".format(bytes / (1024.0 * 1024.0))
+        else -> "%.1f KiB".format(bytes / 1024.0)
+    }
+
+    private fun formatSpeed(bytesPerSecond: Long): String = when {
+        bytesPerSecond >= 1024L * 1024L -> "%.1f MiB/s".format(bytesPerSecond / (1024.0 * 1024.0))
+        else -> "%.1f KiB/s".format(bytesPerSecond / 1024.0)
+    }
+
+    private fun formatEta(seconds: Long): String = when {
+        seconds >= 3600 -> "%dh %02dm".format(seconds / 3600, (seconds % 3600) / 60)
+        seconds >= 60 -> "%dm %02ds".format(seconds / 60, seconds % 60)
+        else -> "${seconds}s"
+    }
+
     private fun parseRepo(value: String): Pair<String, String> {
         val parts = value.trim().split('/')
         require(parts.size == 2 && parts.all { it.isNotBlank() }) { "Repo owner/name biçiminde olmalı" }
@@ -378,7 +504,6 @@ class GitHubReleaseUploader(
     }
 
     private fun sanitizeTag(value: String): String = value.replace(Regex("[^A-Za-z0-9._-]"), "-").take(80)
-    private fun percent(done: Long, total: Long): Int = ((done.toDouble() / total) * 100.0).toInt().coerceIn(0, 98)
     private fun urlEncode(value: String): String = java.net.URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
 
     private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
@@ -388,7 +513,9 @@ class GitHubReleaseUploader(
     companion object {
         const val CHUNK_SIZE_BYTES: Long = 1_932_735_283L // floor(1.8 GiB)
         private const val GITHUB_ASSET_LIMIT_BYTES: Long = 2L * 1024L * 1024L * 1024L
-        private const val MAX_DATA_ASSETS_PER_RELEASE = 990
+        private const val MAX_RELEASE_ASSETS = 1000
+        private const val RESERVED_ASSETS = 1 // storage-manifest.json
+        private const val UPLOAD_CONCURRENCY = 3
         private const val MEDIA_MANIFEST = "manifest.json"
         private const val STORAGE_MANIFEST = "storage-manifest.json"
         private val JSON = "application/json; charset=utf-8".toMediaType()

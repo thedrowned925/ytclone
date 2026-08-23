@@ -10,6 +10,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.Data
 import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
+import com.thedrowned925.ytclone.storage.GitHubCatalogPublisher
 import com.thedrowned925.ytclone.storage.GitHubReleaseUploader
 import com.thedrowned925.ytclone.storage.SettingsStore
 import kotlinx.coroutines.Dispatchers
@@ -30,28 +31,36 @@ class YoutubeIngestWorker(
         if (url.isBlank()) return Result.failure(errorData("Video bağlantısı boş"))
 
         ensureNotificationChannel()
-        setForeground(createForegroundInfo(0, "YTClone hazırlanıyor"))
+        setForeground(createForegroundInfo(0, "queued", "YTClone hazırlanıyor"))
 
         val options = IngestOptions(
             allAudioTracks = inputData.getBoolean(KEY_ALL_AUDIO, true),
             subtitles = inputData.getBoolean(KEY_SUBTITLES, true),
-            keepOriginal = inputData.getBoolean(KEY_KEEP_ORIGINAL, true),
-            createRenditions = inputData.getBoolean(KEY_RENDITIONS, true),
+            keepOriginal = true,
+            createRenditions = false,
         )
         val jobId = sha256(url).take(24)
         val jobDir = File(applicationContext.filesDir, "ingest/$jobId").apply { mkdirs() }
 
-        if (File(jobDir, "publish.json").exists()) {
-            updateProgress(100, "Bu video daha önce yayınlandı")
-            return Result.success(
-                Data.Builder()
-                    .putString(OUTPUT_JOB_ID, jobId)
-                    .putString(OUTPUT_STATE, "published")
-                    .build(),
-            )
+        if (File(jobDir, COMPLETE_MARKER).exists()) {
+            updateProgress("complete", 100, "Bu video daha önce tamamen yayınlandı")
+            return successResult(jobId, File(jobDir, "publish.json"))
         }
 
         return try {
+            val settings = SettingsStore(applicationContext)
+            val token = settings.gitHubToken()
+            val repo = settings.mediaRepo()
+
+            // The media Release may already be fully published while catalog update or
+            // cleanup was interrupted. Resume from metadata only instead of downloading again.
+            val publishFile = File(jobDir, "publish.json")
+            if (publishFile.exists()) {
+                require(!token.isNullOrBlank() && repo.contains('/')) { "GitHub ayarları eksik" }
+                finalizeCatalogAndCleanup(jobId, jobDir, repo, token, publishFile)
+                return successResult(jobId, publishFile)
+            }
+
             val importEngine = YoutubeImportEngine()
             val imported = loadImported(jobDir) ?: withContext(Dispatchers.IO) {
                 importEngine.import(
@@ -59,18 +68,17 @@ class YoutubeIngestWorker(
                     jobDir = jobDir,
                     processId = "ytclone-$jobId",
                     options = options,
-                ) { _, percent, detail ->
-                    updateProgress(percent.coerceIn(0, 70), detail)
+                ) { stage, percent, detail ->
+                    updateProgress(stage, percent.coerceIn(0, 70), detail)
                 }
             }
 
             val manifest = JSONObject(imported.manifestFile.readText())
-            val renditionEngine = RenditionEngine(applicationContext)
-
             var audioTracks = imported.audioTracks
-            if (audioTracks.isEmpty() && manifest.optJSONObject("sourceVideo")?.optBoolean("containsAudio", false) == true) {
-                updateProgress(70, "Varsayılan ses parçası ayrıştırılıyor")
-                val audioFile = renditionEngine.extractFallbackAudio(imported.sourceVideo, jobDir)
+            if (audioTracks.isEmpty() && imported.videoVariants.any { it.containsAudio }) {
+                updateProgress("audio-extract", 70, "Kaynak videodaki varsayılan ses ayrıştırılıyor")
+                val sourceWithAudio = imported.videoVariants.first { it.containsAudio }
+                val audioFile = RenditionEngine(applicationContext).extractFallbackAudio(sourceWithAudio.file, jobDir)
                 val fallback = YoutubeImportEngine.AudioTrack(
                     formatId = "source-audio",
                     language = "und",
@@ -81,49 +89,23 @@ class YoutubeIngestWorker(
                 )
                 audioTracks = listOf(fallback)
                 manifest.put("audioTracks", JSONArray().put(audioTrackJson(fallback)))
-                imported.manifestFile.writeText(manifest.toString(2))
             }
+            if (audioTracks.isEmpty()) error("Bu kaynakta kullanılabilir bir ses parçası bulunamadı")
 
-            if (audioTracks.isEmpty()) {
-                error("Bu kaynakta kullanılabilir bir ses parçası bulunamadı")
-            }
-
-            val renditions = if (options.createRenditions) {
-                renditionEngine.createRenditions(
-                    sourceVideo = imported.sourceVideo,
-                    sourceHeight = imported.sourceHeight,
-                    outputDir = jobDir,
-                ) { height, index, total ->
-                    val stage = 71 + ((index.toDouble() / total.coerceAtLeast(1)) * 10.0).toInt()
-                    updateProgress(stage.coerceAtMost(81), "${height}p Android donanım kodlayıcısıyla hazırlanıyor (${index + 1}/$total)")
-                }
-            } else {
-                emptyList()
-            }
-
-            manifest.put("qualities", JSONObject().apply {
-                if (renditions.isEmpty()) {
-                    put("source", JSONObject()
-                        .put("logicalName", imported.sourceVideo.relativeTo(jobDir).invariantSeparatorsPath)
-                        .put("height", imported.sourceHeight))
-                } else {
-                    renditions.forEach { rendition ->
-                        put("${rendition.height}p", JSONObject()
-                            .put("logicalName", rendition.file.relativeTo(jobDir).invariantSeparatorsPath)
-                            .put("height", rendition.height)
-                            .put("codec", "h264"))
-                    }
-                }
-            })
             manifest.put("status", "ready-to-upload")
+            manifest.put(
+                "catalog",
+                JSONObject()
+                    .put("releaseTag", GitHubCatalogPublisher.CATALOG_TAG)
+                    .put("videoAsset", "catalog.json")
+                    .put("channelAsset", "channels.json"),
+            )
             imported.manifestFile.writeText(manifest.toString(2))
 
-            val settings = SettingsStore(applicationContext)
-            val token = settings.gitHubToken()
-            if (token.isNullOrBlank() || !settings.mediaRepo().contains('/')) {
+            if (token.isNullOrBlank() || !repo.contains('/')) {
                 manifest.put("status", "waiting-for-github-settings")
                 imported.manifestFile.writeText(manifest.toString(2))
-                updateProgress(100, "İşleme tamamlandı; GitHub ayarları bekleniyor")
+                updateProgress("waiting-settings", 70, "Dosyalar hazır; GitHub repo/token ayarları bekleniyor")
                 return Result.success(
                     Data.Builder()
                         .putString(OUTPUT_JOB_ID, jobId)
@@ -132,63 +114,118 @@ class YoutubeIngestWorker(
                 )
             }
 
-            updateProgress(82, "GitHub Release hazırlanıyor")
-            val canExcludeSource = !options.keepOriginal && renditions.isNotEmpty()
-            val excluded = if (canExcludeSource) {
-                setOf(imported.sourceVideo.relativeTo(jobDir).invariantSeparatorsPath)
-            } else {
-                emptySet()
-            }
-
+            updateProgress("chunk-plan", 71, "1.8 GiB chunk planı ve tek Release hazırlanıyor")
             val published = withContext(Dispatchers.IO) {
                 GitHubReleaseUploader().publishJob(
                     jobDir = jobDir,
                     mediaManifest = manifest,
-                    repoValue = settings.mediaRepo(),
+                    repoValue = repo,
                     token = token,
-                    excludedLogicalNames = excluded,
-                ) { percent, detail ->
-                    val mapped = 82 + ((percent.coerceIn(0, 100) / 100.0) * 17.0).toInt()
-                    updateProgress(mapped.coerceAtMost(99), detail)
+                ) { progress ->
+                    val mapped = 72 + ((progress.percent.coerceIn(0, 100) / 100.0) * 23.0).toInt()
+                    updateProgress(
+                        stage = progress.stage,
+                        percent = mapped.coerceAtMost(95),
+                        detail = progress.detail,
+                        doneBytes = progress.doneBytes,
+                        totalBytes = progress.totalBytes,
+                        speedBytesPerSecond = progress.speedBytesPerSecond,
+                        etaSeconds = progress.etaSeconds,
+                    )
                 }
             }
+            check(published.verified) { "GitHub Release doğrulanamadı; yerel dosyalar korunuyor" }
 
-            manifest.put("status", "published")
-            manifest.put("storage", JSONObject()
-                .put("provider", "github-release")
-                .put("primaryReleaseTag", published.primaryReleaseTag)
-                .put("releaseTags", JSONArray(published.releaseTags)))
-            imported.manifestFile.writeText(manifest.toString(2))
-
-            if (canExcludeSource) imported.sourceVideo.delete()
-            updateProgress(100, "YTClone'a yayınlandı")
-
-            Result.success(
-                Data.Builder()
-                    .putString(OUTPUT_JOB_ID, jobId)
-                    .putString(OUTPUT_STATE, "published")
-                    .putString(OUTPUT_VIDEO_ID, published.videoId)
-                    .putString(OUTPUT_RELEASE_TAG, published.primaryReleaseTag)
-                    .build(),
-            )
+            finalizeCatalogAndCleanup(jobId, jobDir, repo, token, publishFile)
+            successResult(jobId, publishFile)
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
-            val message = error.message?.take(300) ?: error.javaClass.simpleName
-            updateProgress(0, "Hata: $message")
+            val message = error.message?.take(400) ?: error.javaClass.simpleName
+            updateProgress("failed", 0, "Hata: $message")
             if (runAttemptCount < 2) Result.retry() else Result.failure(errorData(message))
+        }
+    }
+
+    private suspend fun finalizeCatalogAndCleanup(
+        jobId: String,
+        jobDir: File,
+        repo: String,
+        token: String,
+        publishFile: File,
+    ) {
+        val manifestFile = File(jobDir, "manifest.json")
+        val channelFile = File(jobDir, "channel.json")
+        require(manifestFile.exists()) { "manifest.json bulunamadı; katalog güncellenemedi" }
+        require(channelFile.exists()) { "channel.json bulunamadı; kanal kataloğu güncellenemedi" }
+        val manifest = JSONObject(manifestFile.readText())
+        val channel = JSONObject(channelFile.readText())
+        val publish = JSONObject(publishFile.readText())
+        val releaseTag = publish.getString("primaryReleaseTag")
+
+        val catalogMarker = File(jobDir, CATALOG_MARKER)
+        if (!catalogMarker.exists()) {
+            updateProgress("catalog", 96, "Video ve kanal katalogları güncelleniyor")
+            val catalogResult = withContext(Dispatchers.IO) {
+                GitHubCatalogPublisher().update(
+                    repoValue = repo,
+                    token = token,
+                    mediaManifest = manifest,
+                    channelSnapshot = channel,
+                    videoReleaseTag = releaseTag,
+                ) { detail -> updateProgress("catalog", 97, detail) }
+            }
+            catalogMarker.writeText(
+                JSONObject()
+                    .put("releaseTag", catalogResult.releaseTag)
+                    .put("videoCount", catalogResult.videoCount)
+                    .put("channelCount", catalogResult.channelCount)
+                    .toString(2),
+            )
+        }
+
+        updateProgress("cleanup", 99, "GitHub doğrulandı; telefondaki geçici medya siliniyor")
+        cleanupPayload(jobDir)
+        File(jobDir, COMPLETE_MARKER).writeText(
+            JSONObject()
+                .put("jobId", jobId)
+                .put("completedAtEpochMs", System.currentTimeMillis())
+                .toString(2),
+        )
+        updateProgress("complete", 100, "Yüklendi, katalog güncellendi ve yerel geçici medya temizlendi")
+    }
+
+    private fun cleanupPayload(jobDir: File) {
+        val keep = setOf("manifest.json", "storage-manifest.json", "publish.json", CATALOG_MARKER, COMPLETE_MARKER)
+        jobDir.listFiles()?.forEach { file ->
+            if (file.name in keep) return@forEach
+            if (file.isDirectory) file.deleteRecursively() else file.delete()
         }
     }
 
     private fun loadImported(jobDir: File): YoutubeImportEngine.ImportedMedia? {
         val manifestFile = File(jobDir, "manifest.json")
         if (!manifestFile.exists()) return null
-
         return runCatching {
             val manifest = JSONObject(manifestFile.readText())
-            val source = manifest.getJSONObject("sourceVideo")
-            val sourceFile = File(jobDir, source.getString("logicalName"))
-            if (!sourceFile.exists() || sourceFile.length() <= 0L) return null
+            val qualityObject = manifest.optJSONObject("qualities") ?: return null
+            val videos = mutableListOf<YoutubeImportEngine.VideoVariant>()
+            for (key in qualityObject.keys()) {
+                val item = qualityObject.optJSONObject(key) ?: continue
+                val file = File(jobDir, item.optString("logicalName"))
+                if (!file.exists() || file.length() <= 0L) continue
+                videos += YoutubeImportEngine.VideoVariant(
+                    formatId = item.optString("formatId"),
+                    height = item.optInt("height"),
+                    fps = item.optInt("fps", 30),
+                    codec = item.optString("codec"),
+                    container = item.optString("container"),
+                    file = file,
+                    containsAudio = item.optBoolean("containsAudio", false),
+                )
+            }
+            if (videos.isEmpty()) return null
+            val source = videos.maxWith(compareBy<YoutubeImportEngine.VideoVariant> { it.height }.thenBy { it.fps })
 
             val audio = mutableListOf<YoutubeImportEngine.AudioTrack>()
             val array = manifest.optJSONArray("audioTracks") ?: JSONArray()
@@ -206,15 +243,31 @@ class YoutubeIngestWorker(
                 )
             }
 
+            val channelFile = File(jobDir, manifest.optString("channelLogicalName", "channel.json"))
+            if (!channelFile.exists()) return null
             YoutubeImportEngine.ImportedMedia(
                 title = manifest.optString("title", "Adsız video"),
                 channel = manifest.optString("channel", "Bilinmeyen kanal"),
-                sourceHeight = source.optInt("height", 0),
-                sourceVideo = sourceFile,
+                sourceHeight = source.height,
+                sourceVideo = source.file,
+                videoVariants = videos,
                 audioTracks = audio,
                 manifestFile = manifestFile,
+                channelFile = channelFile,
             )
         }.getOrNull()
+    }
+
+    private fun successResult(jobId: String, publishFile: File): Result {
+        val publish = runCatching { JSONObject(publishFile.readText()) }.getOrNull()
+        return Result.success(
+            Data.Builder()
+                .putString(OUTPUT_JOB_ID, jobId)
+                .putString(OUTPUT_STATE, "published")
+                .putString(OUTPUT_VIDEO_ID, publish?.optString("videoId"))
+                .putString(OUTPUT_RELEASE_TAG, publish?.optString("primaryReleaseTag"))
+                .build(),
+        )
     }
 
     private fun audioTrackJson(track: YoutubeImportEngine.AudioTrack): JSONObject = JSONObject()
@@ -225,19 +278,32 @@ class YoutubeIngestWorker(
         .put("codec", track.codec)
         .put("default", track.isDefault)
 
-    private fun updateProgress(percent: Int, detail: String) {
+    private fun updateProgress(
+        stage: String,
+        percent: Int,
+        detail: String,
+        doneBytes: Long = 0L,
+        totalBytes: Long = 0L,
+        speedBytesPerSecond: Long = 0L,
+        etaSeconds: Long = 0L,
+    ) {
         val safePercent = percent.coerceIn(0, 100)
         setProgressAsync(
             Data.Builder()
+                .putString(PROGRESS_STAGE, stage)
                 .putInt(PROGRESS_PERCENT, safePercent)
-                .putString(PROGRESS_DETAIL, detail.take(500))
+                .putString(PROGRESS_DETAIL, detail.take(700))
+                .putLong(PROGRESS_DONE_BYTES, doneBytes)
+                .putLong(PROGRESS_TOTAL_BYTES, totalBytes)
+                .putLong(PROGRESS_SPEED_BPS, speedBytesPerSecond)
+                .putLong(PROGRESS_ETA_SECONDS, etaSeconds)
                 .build(),
         )
-        notifications.notify(NOTIFICATION_ID, buildNotification(safePercent, detail))
+        notifications.notify(NOTIFICATION_ID, buildNotification(safePercent, stage, detail))
     }
 
-    private fun createForegroundInfo(percent: Int, detail: String): ForegroundInfo {
-        val notification = buildNotification(percent, detail)
+    private fun createForegroundInfo(percent: Int, stage: String, detail: String): ForegroundInfo {
+        val notification = buildNotification(percent, stage, detail)
         return when {
             Build.VERSION.SDK_INT >= 35 -> ForegroundInfo(
                 NOTIFICATION_ID,
@@ -253,16 +319,29 @@ class YoutubeIngestWorker(
         }
     }
 
-    private fun buildNotification(percent: Int, detail: String): Notification =
+    private fun buildNotification(percent: Int, stage: String, detail: String): Notification =
         Notification.Builder(applicationContext, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle("YTClone video arşivliyor")
-            .setContentText(detail.take(90))
-            .setStyle(Notification.BigTextStyle().bigText(detail.take(500)))
+            .setSmallIcon(if (stage == "upload" || stage == "verify" || stage == "catalog") android.R.drawable.stat_sys_upload else android.R.drawable.stat_sys_download)
+            .setContentTitle(notificationTitle(stage))
+            .setContentText(detail.take(100))
+            .setStyle(Notification.BigTextStyle().bigText(detail.take(700)))
             .setProgress(100, percent.coerceIn(0, 100), false)
             .setOnlyAlertOnce(true)
             .setOngoing(percent in 0..99)
             .build()
+
+    private fun notificationTitle(stage: String): String = when (stage) {
+        "metadata", "channel" -> "YTClone bilgileri alıyor"
+        "download-video" -> "YTClone kalite sürümlerini indiriyor"
+        "download-audio", "audio-extract" -> "YTClone sesleri indiriyor"
+        "chunk-plan" -> "YTClone yüklemeyi hazırlıyor"
+        "upload" -> "YTClone GitHub'a yüklüyor"
+        "verify" -> "YTClone yüklemeyi doğruluyor"
+        "catalog" -> "YTClone kataloğu güncelliyor"
+        "cleanup" -> "YTClone geçici dosyaları temizliyor"
+        "complete" -> "YTClone arşivleme tamamlandı"
+        else -> "YTClone video arşivliyor"
+    }
 
     private fun ensureNotificationChannel() {
         notifications.createNotificationChannel(
@@ -271,7 +350,8 @@ class YoutubeIngestWorker(
                 "Video arşivleme",
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
-                description = "YTClone indirme, kalite oluşturma ve GitHub yükleme işlemleri"
+                description = "YTClone indirme, kalite/FPS arşivleme ve GitHub yükleme işlemleri"
+                setShowBadge(false)
             },
         )
     }
@@ -292,14 +372,21 @@ class YoutubeIngestWorker(
         const val KEY_KEEP_ORIGINAL = "keepOriginal"
         const val KEY_RENDITIONS = "renditions"
 
+        const val PROGRESS_STAGE = "progressStage"
         const val PROGRESS_PERCENT = "progressPercent"
         const val PROGRESS_DETAIL = "progressDetail"
+        const val PROGRESS_DONE_BYTES = "progressDoneBytes"
+        const val PROGRESS_TOTAL_BYTES = "progressTotalBytes"
+        const val PROGRESS_SPEED_BPS = "progressSpeedBps"
+        const val PROGRESS_ETA_SECONDS = "progressEtaSeconds"
         const val OUTPUT_JOB_ID = "jobId"
         const val OUTPUT_STATE = "state"
         const val OUTPUT_VIDEO_ID = "videoId"
         const val OUTPUT_RELEASE_TAG = "releaseTag"
         const val OUTPUT_ERROR = "error"
 
+        private const val CATALOG_MARKER = "catalog-published.json"
+        private const val COMPLETE_MARKER = "complete.json"
         private const val CHANNEL_ID = "ytclone-ingest"
         private const val NOTIFICATION_ID = 9251
     }
