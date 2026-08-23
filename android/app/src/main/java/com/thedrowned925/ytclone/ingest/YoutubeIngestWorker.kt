@@ -12,6 +12,8 @@ import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.thedrowned925.ytclone.storage.GitHubReleaseUploader
 import com.thedrowned925.ytclone.storage.SettingsStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -51,13 +53,14 @@ class YoutubeIngestWorker(
 
         return try {
             val importEngine = YoutubeImportEngine()
-            val imported = loadImported(jobDir) ?: importEngine.import(
-                url = url,
-                jobDir = jobDir,
-                processId = "ytclone-$jobId",
-                options = options,
-            ) { _, percent, detail ->
-                updateProgress(percent.coerceIn(0, 70), detail)
+            val imported = loadImported(jobDir) ?: withContext(Dispatchers.IO) {
+                importEngine.import(
+                    url = url,
+                    jobDir = jobDir,
+                    options = options,
+                ) { _, percent, detail ->
+                    updateProgress(percent.coerceIn(0, 70), detail)
+                }
             }
 
             val manifest = JSONObject(imported.manifestFile.readText())
@@ -136,15 +139,17 @@ class YoutubeIngestWorker(
                 emptySet()
             }
 
-            val published = GitHubReleaseUploader().publishJob(
-                jobDir = jobDir,
-                mediaManifest = manifest,
-                repoValue = settings.mediaRepo(),
-                token = token,
-                excludedLogicalNames = excluded,
-            ) { percent, detail ->
-                val mapped = 82 + ((percent.coerceIn(0, 100) / 100.0) * 17.0).toInt()
-                updateProgress(mapped.coerceAtMost(99), detail)
+            val published = withContext(Dispatchers.IO) {
+                GitHubReleaseUploader().publishJob(
+                    jobDir = jobDir,
+                    mediaManifest = manifest,
+                    repoValue = settings.mediaRepo(),
+                    token = token,
+                    excludedLogicalNames = excluded,
+                ) { percent, detail ->
+                    val mapped = 82 + ((percent.coerceIn(0, 100) / 100.0) * 17.0).toInt()
+                    updateProgress(mapped.coerceAtMost(99), detail)
+                }
             }
 
             manifest.put("status", "published")
