@@ -3,6 +3,7 @@ package com.thedrowned925.ytclone
 import android.app.Application
 import android.util.Log
 import com.thedrowned925.ytclone.ingest.YtDlpUpdateManager
+import com.yausername.ffmpeg.FFmpeg
 import com.yausername.youtubedl_android.YoutubeDL
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -15,8 +16,12 @@ class YTCloneApplication : Application() {
     override fun onCreate() {
         super.onCreate()
 
-        runCatching { YoutubeDL.getInstance().init(this) }
-            .onFailure { Log.e(TAG, "yt-dlp initialization failed", it) }
+        runCatching {
+            YoutubeDL.getInstance().init(this)
+            // yt-dlp uses this bundled FFmpeg binary for lossless container remux.
+            // No video/audio re-encoding is performed; only seek indexes/cues are rebuilt.
+            FFmpeg.getInstance().init(this)
+        }.onFailure { Log.e(TAG, "yt-dlp/ffmpeg initialization failed", it) }
 
         // Do not block app startup. Every ingest job checks again before it uses
         // yt-dlp, so a failed startup refresh is harmless and self-healing.
