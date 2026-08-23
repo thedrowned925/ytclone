@@ -1,7 +1,7 @@
 package com.thedrowned925.ytclone.ingest
 
-import dev.ffmpegkit_maintained.ytdlp.YtDlp
-import dev.ffmpegkit_maintained.ytdlp.YtDlpRequest
+import com.yausername.youtubedl_android.YoutubeDL
+import com.yausername.youtubedl_android.YoutubeDLRequest
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -42,13 +42,14 @@ class YoutubeImportEngine {
     fun import(
         url: String,
         jobDir: File,
+        processId: String,
         options: IngestOptions = IngestOptions(),
         onProgress: (stage: String, percent: Int, detail: String) -> Unit,
     ): ImportedMedia {
         jobDir.mkdirs()
         onProgress("metadata", 1, "Video bilgileri okunuyor")
 
-        val metadata = readMetadata(url, jobDir)
+        val metadata = readMetadata(url, "$processId-metadata")
         val formats = readFormats(metadata)
         val videoFormat = chooseSourceVideo(formats)
             ?: error("Uygun video formatı bulunamadı")
@@ -57,22 +58,21 @@ class YoutubeImportEngine {
         }
 
         onProgress("download-video", 3, "Kaynak video indiriliyor")
-        val videoRequest = YtDlpRequest(url)
-            .setOutputTemplate(File(jobDir, "video.source.%(ext)s").absolutePath)
-            .addOption("--no-playlist")
-            .addOption("-f", videoFormat.id)
-            .addOption("--write-info-json")
-            .addOption("--write-thumbnail")
-            .apply {
-                if (options.subtitles) {
-                    addOption("--write-subs")
-                    addOption("--write-auto-subs")
-                    addOption("--sub-langs", "all")
-                    addOption("--sub-format", "vtt/best")
-                }
+        val videoRequest = YoutubeDLRequest(url).apply {
+            addOption("--no-playlist")
+            addOption("-f", videoFormat.id)
+            addOption("-o", File(jobDir, "video.source.%(ext)s").absolutePath)
+            addOption("--write-info-json")
+            addOption("--write-thumbnail")
+            if (options.subtitles) {
+                addOption("--write-subs")
+                addOption("--write-auto-subs")
+                addOption("--sub-langs", "all")
+                addOption("--sub-format", "vtt/best")
             }
+        }
 
-        executeChecked(videoRequest) { progress, _, line ->
+        executeChecked(videoRequest, "$processId-video") { progress, _, line ->
             val mapped = 3 + (progress.coerceIn(0f, 100f) * 0.42f).roundToInt()
             onProgress("download-video", mapped, line)
         }
@@ -86,12 +86,13 @@ class YoutubeImportEngine {
             val start = 46 + ((index.toDouble() / selectedAudio.size.coerceAtLeast(1)) * 24.0).roundToInt()
             onProgress("download-audio", start, "Ses ${index + 1}/${selectedAudio.size}: ${format.language} ${format.note}")
 
-            val request = YtDlpRequest(url)
-                .setOutputTemplate(File(jobDir, "${base}%(ext)s").absolutePath)
-                .addOption("--no-playlist")
-                .addOption("-f", format.id)
+            val request = YoutubeDLRequest(url).apply {
+                addOption("--no-playlist")
+                addOption("-f", format.id)
+                addOption("-o", File(jobDir, "${base}%(ext)s").absolutePath)
+            }
 
-            executeChecked(request) { progress, _, line ->
+            executeChecked(request, "$processId-audio-$index") { progress, _, line ->
                 val span = 24.0 / selectedAudio.size.coerceAtLeast(1)
                 val mapped = 46 + ((index * span) + (progress.coerceIn(0f, 100f) / 100f * span)).roundToInt()
                 onProgress("download-audio", mapped.coerceAtMost(70), line)
@@ -124,37 +125,34 @@ class YoutubeImportEngine {
         )
     }
 
-    private fun readMetadata(url: String, jobDir: File): JSONObject {
-        jobDir.listFiles()
-            ?.filter { it.name.startsWith("metadata.") && it.name.endsWith(".info.json") }
-            ?.forEach(File::delete)
-
-        val request = YtDlpRequest(url)
-            .setOutputTemplate(File(jobDir, "metadata.%(ext)s").absolutePath)
-            .addOption("--write-info-json")
-            .addOption("--skip-download")
-            .addOption("--no-playlist")
-
-        executeChecked(request) { _, _, _ -> }
-
-        val metadataFile = jobDir.listFiles()
-            ?.filter { it.isFile && it.name.startsWith("metadata.") && it.name.endsWith(".info.json") }
-            ?.maxByOrNull(File::lastModified)
-            ?: error("yt-dlp metadata JSON dosyası oluşturmadı")
-
-        return JSONObject(metadataFile.readText())
+    private fun readMetadata(url: String, processId: String): JSONObject {
+        val request = YoutubeDLRequest(url).apply {
+            addOption("--dump-single-json")
+            addOption("--skip-download")
+            addOption("--no-playlist")
+            addOption("--no-warnings")
+        }
+        val response = YoutubeDL.getInstance().execute(request, processId, null)
+        if (response.exitCode != 0) {
+            error("yt-dlp metadata hatası: ${response.err.ifBlank { "exit=${response.exitCode}" }}")
+        }
+        val output = response.out.trim()
+        val jsonLine = output.lineSequence().lastOrNull { it.trimStart().startsWith("{") }
+            ?: error("yt-dlp metadata JSON döndürmedi")
+        return JSONObject(jsonLine)
     }
 
     private fun executeChecked(
-        request: YtDlpRequest,
+        request: YoutubeDLRequest,
+        processId: String,
         callback: (progress: Float, etaSeconds: Long, line: String) -> Unit,
     ) {
-        val response = YtDlp.execute(request) { progress, eta, line ->
-            callback(progress, eta, line.orEmpty())
+        val response = YoutubeDL.getInstance().execute(request, processId) { progress, eta, line ->
+            callback(progress, eta, line)
         }
-        if (!response.isSuccess) {
-            val detail = response.errorOutput.takeIf { it.isNotBlank() }
-                ?: response.output.takeIf { it.isNotBlank() }
+        if (response.exitCode != 0) {
+            val detail = response.err.takeIf { it.isNotBlank() }
+                ?: response.out.takeIf { it.isNotBlank() }
                 ?: "exit=${response.exitCode}"
             error("yt-dlp işlemi başarısız: $detail")
         }
