@@ -1,7 +1,7 @@
 package com.thedrowned925.ytclone.ingest
 
-import com.yausername.youtubedl_android.YoutubeDL
-import com.yausername.youtubedl_android.YoutubeDLRequest
+import dev.ffmpegkit_maintained.ytdlp.compat.YoutubeDL
+import dev.ffmpegkit_maintained.ytdlp.compat.YoutubeDLRequest
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -108,9 +108,6 @@ class YoutubeImportEngine {
             )
         }
 
-        // Some sources only expose progressive video+audio formats. If there was
-        // no separate audio-only stream, preserve the source as the default audio
-        // carrier for now; the catalog records this explicitly for the player.
         val manifest = buildManifest(metadata, videoFormat, sourceVideo, downloadedAudio, options)
         val manifestFile = File(jobDir, "manifest.json")
         manifestFile.writeText(manifest.toString(2))
