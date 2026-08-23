@@ -34,15 +34,16 @@ private data class IngestStep(
 )
 
 private val ingestSteps = listOf(
+    IngestStep("ytdlp-update", "yt-dlp güncelleniyor / kontrol ediliyor"),
     IngestStep("metadata", "Video ve format bilgileri alınıyor"),
-    IngestStep("download-video", "4K'ya kadar kalite/FPS sürümleri indiriliyor"),
+    IngestStep("download-video", "4K'ya kadar her kalitenin en yüksek FPS sürümü indiriliyor"),
     IngestStep("download-audio", "Ses parçaları ve altyazılar indiriliyor"),
     IngestStep("channel", "Kanal, avatar ve banner bilgileri alınıyor"),
     IngestStep("chunk-plan", "1.8 GiB chunk planı hazırlanıyor"),
     IngestStep("upload", "Tek GitHub Release'e yükleniyor"),
     IngestStep("verify", "GitHub yüklemesi doğrulanıyor"),
     IngestStep("catalog", "Video ve kanal katalogları güncelleniyor"),
-    IngestStep("cleanup", "Telefondaki geçici medya temizleniyor"),
+    IngestStep("cleanup", "Download/YTClone çalışma klasörü temizleniyor"),
     IngestStep("complete", "Yüklendi ve güncellendi"),
 )
 
@@ -61,15 +62,14 @@ fun IngestProgressCard(workId: String?) {
     val percent = if (state == WorkInfo.State.SUCCEEDED) 100 else rawPercent.coerceIn(0, 100)
     val stage = when (state) {
         WorkInfo.State.SUCCEEDED -> "complete"
-        WorkInfo.State.FAILED -> "failed"
-        WorkInfo.State.CANCELLED -> "failed"
+        WorkInfo.State.FAILED, WorkInfo.State.CANCELLED -> "failed"
         WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED -> "queued"
         else -> info?.progress?.getString(YoutubeIngestWorker.PROGRESS_STAGE) ?: "queued"
     }
 
     val detail = when (state) {
         WorkInfo.State.ENQUEUED, WorkInfo.State.BLOCKED -> "Kuyrukta · ağ bağlantısı bekleniyor olabilir"
-        WorkInfo.State.SUCCEEDED -> "Yüklendi, GitHub doğrulandı, katalog güncellendi ve geçici medya temizlendi."
+        WorkInfo.State.SUCCEEDED -> "Yüklendi, GitHub doğrulandı, katalog güncellendi ve Download/YTClone geçici medya klasörü temizlendi."
         WorkInfo.State.FAILED -> info.outputData.getString(YoutubeIngestWorker.OUTPUT_ERROR)?.let { "Hata: $it" }
             ?: "İşlem başarısız oldu"
         WorkInfo.State.CANCELLED -> "İşlem iptal edildi"
@@ -171,6 +171,7 @@ fun IngestProgressCard(workId: String?) {
 
 private fun activeStepIndex(stage: String, percent: Int): Int {
     val normalized = when (stage) {
+        "queued" -> "ytdlp-update"
         "audio-extract" -> "download-audio"
         "published" -> "verify"
         "waiting-settings" -> "chunk-plan"
@@ -183,7 +184,8 @@ private fun activeStepIndex(stage: String, percent: Int): Int {
             percent >= 69 -> "channel"
             percent >= 53 -> "download-audio"
             percent >= 4 -> "download-video"
-            else -> "metadata"
+            percent >= 2 -> "metadata"
+            else -> "ytdlp-update"
         }
         else -> stage
     }

@@ -29,7 +29,9 @@ class YoutubeImportEngine {
         val file: File,
         val containsAudio: Boolean,
     ) {
+        // Match YouTube's UI: 1080p60 when high frame-rate exists, otherwise 1080p.
         val id: String get() = "${height}p${fps.takeIf { it > 30 } ?: ""}"
+        val displayLabel: String get() = id
     }
 
     data class AudioTrack(
@@ -64,7 +66,7 @@ class YoutubeImportEngine {
         onProgress: (stage: String, percent: Int, detail: String) -> Unit,
     ): ImportedMedia {
         jobDir.mkdirs()
-        onProgress("metadata", 1, "Video bilgileri ve format listesi okunuyor")
+        onProgress("metadata", 1, "Video bilgileri ve kalite listesi okunuyor")
 
         val metadata = readMetadata(url, "$processId-metadata")
         val formats = readFormats(metadata)
@@ -77,17 +79,17 @@ class YoutubeImportEngine {
 
         val downloadedVideos = mutableListOf<VideoVariant>()
         selectedVideos.forEachIndexed { index, format ->
-            val fpsSuffix = if (format.fps > 30) "-${format.fps}fps" else "-${format.fps.coerceAtLeast(1)}fps"
-            val base = "video.${format.height}p$fpsSuffix.${sanitize(format.id)}."
+            val quality = qualityLabel(format.height, format.fps)
+            val base = "video.$quality.${sanitize(format.id)}."
             val start = 4 + ((index.toDouble() / selectedVideos.size) * 48.0).roundToInt()
             onProgress(
                 "download-video",
                 start,
-                "${format.height}p ${format.fps} FPS indiriliyor (${index + 1}/${selectedVideos.size})",
+                "$quality indiriliyor (${index + 1}/${selectedVideos.size})",
             )
 
             val request = YoutubeDLRequest(url).apply {
-                addOption("--no-playlist")
+                commonOptions()
                 addOption("-f", format.id)
                 addOption("-o", File(jobDir, "${base}%(ext)s").absolutePath)
                 if (index == 0) {
@@ -109,12 +111,12 @@ class YoutubeImportEngine {
                 onProgress(
                     "download-video",
                     mapped.coerceAtMost(52),
-                    "${format.height}p ${format.fps} FPS • ${progress.roundToInt()}%$etaText • ${cleanLine(line)}",
+                    "$quality • ${progress.roundToInt()}%$etaText • ${cleanLine(line)}",
                 )
             }
 
             val file = findDownloaded(jobDir, base)
-                ?: error("${format.height}p ${format.fps} FPS indirildi fakat dosya bulunamadı")
+                ?: error("$quality indirildi fakat dosya bulunamadı")
             downloadedVideos += VideoVariant(
                 formatId = format.id,
                 height = format.height,
@@ -137,7 +139,7 @@ class YoutubeImportEngine {
             )
 
             val request = YoutubeDLRequest(url).apply {
-                addOption("--no-playlist")
+                commonOptions()
                 addOption("-f", format.id)
                 addOption("-o", File(jobDir, "${base}%(ext)s").absolutePath)
             }
@@ -176,7 +178,7 @@ class YoutubeImportEngine {
         onProgress(
             "download-complete",
             70,
-            "${downloadedVideos.size} kalite/FPS sürümü, ${downloadedAudio.size} ses ve altyazılar hazır",
+            "${downloadedVideos.size} kalite, ${downloadedAudio.size} ses parçası ve altyazılar hazır",
         )
         val source = downloadedVideos.maxWith(compareBy<VideoVariant> { it.height }.thenBy { it.fps })
         return ImportedMedia(
@@ -191,12 +193,22 @@ class YoutubeImportEngine {
         )
     }
 
+    private fun YoutubeDLRequest.commonOptions() {
+        addOption("--no-playlist")
+        // YTClone owns the yt-dlp updater, so its built-in age warning is noise.
+        addOption("--no-update")
+        // Current YouTube playback uses JS challenges. The Android wrapper already
+        // bundles QuickJS; let yt-dlp fetch its official EJS solver scripts from
+        // the yt-dlp GitHub component source so signature solving stays current.
+        addOption("--remote-components", "ejs:github")
+        addOption("--no-warnings")
+    }
+
     private fun readMetadata(url: String, processId: String): JSONObject {
         val request = YoutubeDLRequest(url).apply {
+            commonOptions()
             addOption("--dump-single-json")
             addOption("--skip-download")
-            addOption("--no-playlist")
-            addOption("--no-warnings")
         }
         return executeJson(request, processId)
     }
@@ -206,11 +218,11 @@ class YoutubeImportEngine {
         val channelMetadata = channelUrl?.let { url ->
             runCatching {
                 val request = YoutubeDLRequest(url).apply {
+                    commonOptions()
                     addOption("--dump-single-json")
                     addOption("--flat-playlist")
                     addOption("--playlist-end", "1")
                     addOption("--skip-download")
-                    addOption("--no-warnings")
                 }
                 executeJson(request, processId)
             }.getOrNull()
@@ -270,7 +282,7 @@ class YoutubeImportEngine {
                 val item = array.optJSONObject(index) ?: continue
                 val id = item.optString("format_id")
                 if (id.isBlank()) continue
-                val fps = item.optDoubleSafe("fps").roundToInt().coerceAtLeast(1)
+                val fps = item.optDoubleSafe("fps").roundToInt().takeIf { it > 0 } ?: 30
                 add(
                     FormatCandidate(
                         id = id,
@@ -291,23 +303,31 @@ class YoutubeImportEngine {
         }
     }
 
+    /**
+     * Exactly one archived stream per resolution. If YouTube offers 1080p60 and
+     * 1080p30, keep 1080p60 only. If it offers only 1080p30, archive it as 1080p.
+     */
     private fun chooseVideoVariants(formats: List<FormatCandidate>): List<FormatCandidate> {
         val allowed = formats.filter {
             it.vcodec != "none" && it.height in 1..MAX_HEIGHT
         }
         return allowed
-            .groupBy { it.height to it.fps }
+            .groupBy { it.height }
             .values
-            .mapNotNull { variants ->
-                variants.maxByOrNull { format ->
-                    (if (format.acodec == "none") 10_000_000_000L else 0L) +
-                        (if (format.ext == "mp4") 1_000_000_000L else 0L) +
-                        (format.tbr * 10_000).toLong() +
-                        format.filesize.coerceAtLeast(0L) / 1024L
-                }
+            .mapNotNull { sameResolution ->
+                val highestFps = sameResolution.maxOfOrNull { it.fps } ?: return@mapNotNull null
+                sameResolution
+                    .filter { it.fps == highestFps }
+                    .maxByOrNull(::videoScore)
             }
-            .sortedWith(compareByDescending<FormatCandidate> { it.height }.thenByDescending { it.fps })
+            .sortedByDescending { it.height }
     }
+
+    private fun videoScore(format: FormatCandidate): Long =
+        (if (format.acodec == "none") 10_000_000_000L else 0L) +
+            (if (format.ext == "mp4") 1_000_000_000L else 0L) +
+            (format.tbr * 10_000).toLong() +
+            format.filesize.coerceAtLeast(0L) / 1024L
 
     private fun chooseAudioTracks(formats: List<FormatCandidate>): List<FormatCandidate> {
         val audio = formats.filter { it.vcodec == "none" && it.acodec != "none" }
@@ -346,7 +366,7 @@ class YoutubeImportEngine {
         jobDir: File,
         channelFile: File,
     ): JSONObject = JSONObject().apply {
-        put("schemaVersion", 3)
+        put("schemaVersion", 4)
         put("source", "youtube")
         put("sourceId", metadata.optString("id"))
         put("webpageUrl", metadata.optString("webpage_url"))
@@ -358,7 +378,9 @@ class YoutubeImportEngine {
         put("uploadDate", metadata.optString("upload_date"))
         put("durationSeconds", metadata.optDouble("duration", 0.0))
         put("thumbnail", metadata.optString("thumbnail"))
+        put("thumbnailLogicalName", findThumbnail(jobDir)?.name ?: "")
         put("maxArchivedHeight", MAX_HEIGHT)
+        put("qualityPolicy", "one-highest-fps-stream-per-resolution")
         put("channelLogicalName", channelFile.name)
         put("ingestOptions", JSONObject().apply {
             put("allAudioTracks", options.allAudioTracks)
@@ -453,6 +475,12 @@ class YoutubeImportEngine {
             }
             ?.maxByOrNull { it.length() }
 
+    private fun findThumbnail(directory: File): File? = directory.listFiles()
+        ?.asSequence()
+        ?.filter { it.isFile && it.extension.lowercase() in setOf("webp", "jpg", "jpeg", "png") }
+        ?.filterNot { it.name.startsWith("channel-avatar") || it.name.startsWith("channel-banner") }
+        ?.maxByOrNull { it.length() }
+
     private fun subtitleLanguage(name: String): String {
         val parts = name.split('.')
         return parts.dropLast(1).lastOrNull { it.matches(Regex("[A-Za-z]{2,3}(?:-[A-Za-z0-9]+)?")) } ?: "und"
@@ -476,6 +504,7 @@ class YoutubeImportEngine {
         }
     }
 
+    private fun qualityLabel(height: Int, fps: Int): String = "${height}p${fps.takeIf { it > 30 } ?: ""}"
     private fun sanitize(value: String): String = value.replace(Regex("[^A-Za-z0-9._-]"), "_").take(60)
     private fun cleanLine(value: String): String = value.replace(Regex("\\s+"), " ").trim().take(90)
     private fun formatEta(seconds: Long): String = when {

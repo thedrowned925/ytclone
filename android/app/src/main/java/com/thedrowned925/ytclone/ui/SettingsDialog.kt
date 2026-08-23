@@ -17,6 +17,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import com.thedrowned925.ytclone.storage.SettingsStore
 
 @Composable
 fun SettingsDialog(
@@ -25,25 +26,18 @@ fun SettingsDialog(
     onDismiss: () -> Unit,
     onSave: (repo: String, newToken: String?) -> Unit,
 ) {
-    var repo by remember(initialRepo) { mutableStateOf(initialRepo) }
     var token by remember { mutableStateOf("") }
+    val repo = SettingsStore.DEFAULT_MEDIA_REPO
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("YTClone depolama") },
+        title = { Text("YTClone GitHub bağlantısı") },
         text = {
             Column {
-                Text("GitHub Releases medya deposu. Token uygulamaya gömülmez; Android Keystore ile bu cihazda korunur.")
+                Text("Medya deposu otomatik ayarlı: $repo")
+                Spacer(Modifier.height(6.dp))
+                Text("Token uygulamaya gömülmez; Android Keystore ile bu cihazda şifreli korunur.")
                 Spacer(Modifier.height(14.dp))
-                OutlinedTextField(
-                    value = repo,
-                    onValueChange = { repo = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Media repo") },
-                    placeholder = { Text("owner/repo") },
-                    singleLine = true,
-                )
-                Spacer(Modifier.height(10.dp))
                 OutlinedTextField(
                     value = token,
                     onValueChange = { token = it },
@@ -61,10 +55,10 @@ fun SettingsDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    onSave(repo.trim(), token.trim().takeIf { it.isNotBlank() })
+                    onSave(repo, token.trim().takeIf { it.isNotBlank() })
                     onDismiss()
                 },
-                enabled = repo.count { it == '/' } == 1,
+                enabled = tokenConfigured || token.isNotBlank(),
             ) { Text("Kaydet") }
         },
         dismissButton = {

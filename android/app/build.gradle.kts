@@ -11,8 +11,8 @@ android {
         applicationId = "com.thedrowned925.ytclone"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 4
+        versionName = "0.1.3"
     }
 
     buildFeatures {
@@ -36,8 +36,6 @@ android {
 }
 
 dependencies {
-    // Compose 1.11 is the last stable line before Compose 1.12 started
-    // requiring compileSdk 37. This keeps the first test APK buildable on SDK 36.
     val composeBom = platform("androidx.compose:compose-bom:2026.04.01")
     implementation(composeBom)
 
@@ -63,8 +61,6 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.11.2")
     implementation("com.squareup.okhttp3:okhttp-android:5.1.0")
 
-    // Full Android yt-dlp wrapper: arbitrary yt-dlp CLI options, stdout JSON,
-    // process cancellation, and bundled ffmpeg support.
     val youtubedlAndroid = "0.18.1"
     implementation("io.github.junkfood02.youtubedl-android:library:$youtubedlAndroid")
     implementation("io.github.junkfood02.youtubedl-android:ffmpeg:$youtubedlAndroid")
