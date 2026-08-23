@@ -2,7 +2,7 @@ package com.thedrowned925.ytclone
 
 import android.app.Application
 import android.util.Log
-import com.yausername.youtubedl_android.YoutubeDL
+import dev.ffmpegkit_maintained.ytdlp.compat.YoutubeDL
 
 class YTCloneApplication : Application() {
     override fun onCreate() {
